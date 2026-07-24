@@ -1,0 +1,105 @@
+# Self-Supervised Satellite Change Detection
+
+An end-to-end PyTorch pipeline that learns Sentinel-2 representations from **unlabelled imagery** with temporal contrastive pretraining, then detects change by comparing dense feature maps. Human labels are not required for training; optional masks are used only for evaluation and threshold calibration.
+
+## What is implemented
+
+- GeoTIFF/NumPy Sentinel-2 ingestion with per-band robust normalization and nodata masking.
+- Spatially aligned temporal-pair sampling and satellite-safe augmentation.
+- SimCLR/NT-Xent self-supervised pretraining with a convolutional encoder.
+- Dense, multiscale feature-distance change maps.
+- Unsupervised thresholding (Otsu or percentile) and morphological cleanup.
+- Evaluation with IoU, F1, precision, recall, AUROC and average precision.
+- Tiled inference for large scenes with overlap blending and GeoTIFF output.
+- Synthetic paired-scene generator and tests for a fully reproducible smoke run.
+
+## Data layout
+
+Each acquisition is a multiband `.tif`/`.tiff` or `.npy` array (`C,H,W`). Files with the same scene key and different dates form temporal pairs:
+
+```text
+data/
+  train/
+    amazon_2023-01-12.tif
+    amazon_2023-08-20.tif
+    dubai_2023-02-01.tif
+    dubai_2024-02-03.tif
+```
+
+The default filename parser removes a trailing `YYYY-MM-DD` or `YYYYMMDD` to obtain the scene key. A CSV manifest can instead contain `path,scene,date,split`.
+
+Recommended Sentinel-2 L2A bands at 10 m are `B02,B03,B04,B08`. Resample other bands before stacking. Reflectance may be stored as `0..1` or Sentinel integer scale (`0..10000`); both are handled.
+
+## Install
+
+Python 3.10+ is recommended.
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+source .venv/bin/activate
+pip install -e ".[geo,test]"
+```
+
+## Quick start
+
+Generate deterministic synthetic imagery (including evaluation masks):
+
+```bash
+python scripts/make_synthetic.py --output data/synthetic --scenes 12 --size 128
+```
+
+Pretrain on all single-date images:
+
+```bash
+python -m sat_change.train --data data/synthetic/images --output outputs/pretrain --epochs 10 --batch-size 32
+```
+
+Run change detection on a registered pair:
+
+```bash
+python -m sat_change.predict \
+  --before data/synthetic/images/scene000_20230101.npy \
+  --after data/synthetic/images/scene000_20240101.npy \
+  --checkpoint outputs/pretrain/best.pt \
+  --output outputs/scene000_change.npy
+```
+
+Evaluate all synthetic pairs:
+
+```bash
+python -m sat_change.evaluate \
+  --images data/synthetic/images \
+  --masks data/synthetic/masks \
+  --checkpoint outputs/pretrain/best.pt \
+  --output outputs/metrics.json
+```
+
+For a one-command end-to-end demo, run `python scripts/demo.py`. On CPU, use fewer epochs while validating the plumbing.
+
+## Google Earth Engine export
+
+1. Filter `COPERNICUS/S2_SR_HARMONIZED` by AOI, date and cloud percentage.
+2. Mask clouds using `COPERNICUS/S2_CLOUD_PROBABILITY` (and optionally SCL).
+3. Create a median/medoid composite for each time window.
+4. Select `B2,B3,B4,B8`, reproject both composites to the **same CRS, affine transform and 10 m grid**, and export each as GeoTIFF.
+5. Name both files with a common scene key and acquisition-window date.
+
+Change detection assumes pixel-level coregistration. Atmospheric differences, seasonal phenology, clouds, shadows and acquisition-angle differences can otherwise dominate the learned distance.
+
+## Methodology
+
+During pretraining, two augmented views of the same patch are positives and all other batch samples are negatives. The encoder learns invariance to mild spectral jitter, flips, rotations, blur and small noise while retaining spatial structure. At inference, normalized dense features for before/after patches are compared by cosine distance. Fine and coarse encoder stages are upsampled and averaged, producing a pixel-level anomaly score. Otsu thresholding makes the final mask label-free.
+
+For honest evaluation, split by **geographic scene**, not patches, to avoid spatial leakage. Fit any threshold only on a validation region and report results once on held-out geographies. In addition to F1/IoU, report precision-recall curves because change pixels are usually rare. Compare against raw spectral difference and index-difference baselines (NDVI/NDBI/NDWI) and stratify results by biome, season, cloud cover and change type.
+
+## Limitations
+
+This is a research baseline, not an operational disaster product. It does not perform image registration or cloud masking internally. Contrastive features trained on a small local archive may not transfer across biomes. Floods are especially time-sensitive; use well-matched cloud-free pre/post composites and validate thresholds locally.
+
+## Tests
+
+```bash
+pytest -q
+```
+
