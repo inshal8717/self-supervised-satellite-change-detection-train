@@ -13,6 +13,7 @@ dependencies = ["numpy>=1.24", "torch>=2.1", "Pillow>=10"]
 [project.optional-dependencies]
 geo = ["rasterio>=1.3"]
 test = ["pytest>=7"]
+dashboard = ["streamlit>=1.38", "plotly>=5.22"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -20,4 +21,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-

@@ -103,3 +103,13 @@ This is a research baseline, not an operational disaster product. It does not pe
 pytest -q
 ```
 
+## Streamlit dashboard
+
+Install the dashboard extras and launch the interactive frontend:
+
+```bash
+pip install -e ".[geo,dashboard]"
+streamlit run app.py
+```
+
+The dashboard selects a checkpoint from `outputs/`, accepts a registered before/after `.npy` or GeoTIFF pair, and displays the input images, dense change heatmap, binary mask, threshold, changed-pixel percentage, and optional IoU/F1/precision/recall/AUROC metrics when a ground-truth mask is provided. GeoTIFF inputs with CRS metadata also expose a geospatial changed-pixel layer and GeoTIFF downloads; NumPy inputs provide `.npy` downloads.
