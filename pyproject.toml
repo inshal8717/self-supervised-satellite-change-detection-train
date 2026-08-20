@@ -12,6 +12,7 @@ dependencies = ["numpy>=1.24", "torch>=2.1", "Pillow>=10"]
 
 [project.optional-dependencies]
 geo = ["rasterio>=1.3"]
+fetch = ["rasterio>=1.3", "pystac-client>=0.8", "planetary-computer>=1.0"]
 test = ["pytest>=7"]
 dashboard = ["streamlit>=1.38", "plotly>=5.22"]
 

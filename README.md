@@ -12,6 +12,7 @@ An end-to-end PyTorch pipeline that learns Sentinel-2 representations from **unl
 - Evaluation with IoU, F1, precision, recall, AUROC and average precision.
 - Tiled inference for large scenes with overlap blending and GeoTIFF output.
 - Synthetic paired-scene generator and tests for a fully reproducible smoke run.
+- On-demand fetch of real Sentinel-2 L2A pairs from Microsoft Planetary Computer (`scripts/fetch_sentinel2.py`).
 
 ## Data layout
 
@@ -75,9 +76,72 @@ python -m sat_change.evaluate \
   --output outputs/metrics.json
 ```
 
-For a one-command end-to-end demo, run `python scripts/demo.py`. On CPU, use fewer epochs while validating the plumbing.
+For a one-command end-to-end demo, run `python scripts/demo.py`. The demo automatically detects whether real satellite data exists in `data/real/` with ground-truth masks; if so, it uses that, otherwise it generates synthetic data. Use `--real` to force real data or `--synthetic` to force synthetic.
+
+```bash
+# Auto-detect (real if available, else synthetic)
+python scripts/demo.py
+
+# Force real satellite data (requires data/real/ with images + masks)
+python scripts/demo.py --real
+
+# Force synthetic data (always generates fresh scenes)
+python scripts/demo.py --synthetic
+```
+
+## Real satellite data
+
+The repo ships with a synthetic-data generator so the full pipeline runs offline, but you can fetch **real, open Sentinel-2 imagery** straight from Microsoft Planetary Computer — no account or API key required. `scripts/fetch_sentinel2.py` downloads surface-reflectance acquisitions (`B02/B03/B04/B08` at 10 m) for any location and two time windows, co-registers both to a common 10 m UTM grid, and writes them in the layout the pipeline expects (including an optional change mask and a CSV manifest).
+
+Install the fetch dependencies:
+
+```bash
+pip install -e ".[fetch]"
+```
+
+Fetch a before/after pair over a 6 km area:
+
+```bash
+python scripts/fetch_sentinel2.py \
+  --center=-115.2,36.1 \        # AOI center, lon,lat (quote on shells that eat '-')
+  --size 6 \                     # AOI side length in km
+  --before 2023-01-01/2023-03-31 # first acquisition window (ISO date range)
+  --after 2023-08-01/2023-10-31  # second acquisition window
+  --scene vegas \                # scene key used in all filenames
+  --output data/real \
+  --cloud-max 25 \               # max eo:cloud_cover per scene
+  --limit 3 \                    # median-composite up to 3 acquisitions per window
+  --mask path/to/change_mask.tif # optional ground-truth mask for evaluation
+```
+
+Output layout (identical to the synthetic layout):
+
+```text
+data/real/
+  vegas/
+    images/vegas_2023-03-31.tif
+    images/vegas_2023-09-07.tif
+    masks/vegas.tif              # only if --mask was given
+    manifest.csv
+    metadata.json
+```
+
+Fetch several scenes into the same `--output` directory to build a real pretraining archive. Each acquisition is a cloud-free (or SCL-cloud-masked) composite, co-registered to a shared 10 m grid so change detection is meaningful. Pretrain and run change detection exactly as with synthetic data:
+
+```bash
+python -m sat_change.train --data data/real --output outputs/pretrain --epochs 50
+python -m sat_change.predict \
+  --before data/real/vegas/images/vegas_2023-03-31.tif \
+  --after  data/real/vegas/images/vegas_2023-09-07.tif \
+  --checkpoint outputs/pretrain/best.pt \
+  --output outputs/vegas_change.tif
+```
+
+For honest evaluation you need ground-truth change masks. Provide one per scene via `--mask` during the fetch (or export masks yourself); without masks you can still inspect the dense score maps but IoU/F1/AUROC are unavailable.
 
 ## Google Earth Engine export
+
+If you prefer GEE (or need a very specific date), you can export the same inputs there:
 
 1. Filter `COPERNICUS/S2_SR_HARMONIZED` by AOI, date and cloud percentage.
 2. Mask clouds using `COPERNICUS/S2_CLOUD_PROBABILITY` (and optionally SCL).
