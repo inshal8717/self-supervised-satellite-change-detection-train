@@ -1,12 +1,12 @@
 # Self-Supervised Satellite Change Detection
 
-An end-to-end PyTorch pipeline that learns Sentinel-2 representations from **unlabelled imagery** with temporal contrastive pretraining, then detects change by comparing dense feature maps. Human labels are not required for training; optional masks are used only for evaluation and threshold calibration.
+An end-to-end PyTorch pipeline that learns Sentinel-2 representations from **unlabelled imagery** with SimCLR-style contrastive pretraining (two augmented views of the same patch), then detects change by comparing dense feature maps from before/after imagery. Human labels are not required for training; optional masks are used only for evaluation and threshold calibration.
 
 **Repository version:** `0.1.0` (defined in `pyproject.toml` and `src/sat_change/__init__.py`)
 
 ## The Problem
 
-Satellite change detection is useful for monitoring construction, land-use transitions, agriculture, and environmental events, but pixel-level labels are expensive and difficult to maintain across locations and seasons. This project provides a label-efficient baseline: it learns from temporal satellite imagery alone, produces dense change maps for registered image pairs, and supports both offline synthetic data and real Sentinel-2 L2A scenes.
+Satellite change detection is useful for monitoring construction, land-use transitions, agriculture, and environmental events, but pixel-level labels are expensive and difficult to maintain across locations and seasons. This project provides a label-efficient baseline: it learns generic multispectral features from unlabelled satellite imagery, produces dense change/anomaly maps for registered image pairs, and supports both offline synthetic data and real Sentinel-2 L2A scenes.
 
 The value is an inspectable, reproducible workflow rather than a black-box prediction service. It includes ingestion, normalization, self-supervised training, tiled inference, unsupervised thresholding, geospatial output, and evaluation against masks when they are available.
 
@@ -15,7 +15,7 @@ The value is an inspectable, reproducible workflow rather than a black-box predi
 ```mermaid
 flowchart LR
     A[Sentinel-2 temporal images<br/>B02 B03 B04 B08] --> B[Read + robust<br/>per-band normalization]
-    B --> C[Aligned patch sampler<br/>satellite-safe augmentations]
+    B --> C[Single-image patch sampler<br/>satellite-safe augmentations]
     C --> D1[View 1]
     C --> D2[View 2]
     D1 --> E[Shared convolutional encoder]
@@ -30,8 +30,7 @@ flowchart LR
     J --> K[Cosine feature distance<br/>at 3 scales]
     K --> L[Upsample + average]
     L --> M[Otsu or percentile threshold]
-    M --> N[Morphological cleanup]
-    N --> O[Change mask + GeoTIFF/NumPy score map]
+    M --> O[Change mask + GeoTIFF/NumPy score map]
 ```
 
 The encoder is fully convolutional: a stem followed by three downsampling stages with widths `32 -> 64 -> 128 -> 256`. Its intermediate feature maps retain spatial information. During inference, distances between before/after features from all three stages are resized to the input resolution and averaged, which balances local detail with broader context.
@@ -39,7 +38,7 @@ The encoder is fully convolutional: a stem followed by three downsampling stages
 ## Engineering Trade-offs
 
 - **Compact CNN instead of a large pretrained backbone:** the repository favors a small, dependency-light encoder that can train offline on modest hardware and preserve dense feature stages. A larger ResNet or transformer could improve transfer performance, but would add compute, memory, and pretrained-weight assumptions.
-- **Self-supervised NT-Xent instead of supervised segmentation:** paired augmented views make it possible to use unlabelled imagery. This removes annotation cost, at the expense of requiring careful temporal registration and producing a threshold-sensitive anomaly score rather than a directly supervised class probability.
+- **Self-supervised NT-Xent instead of supervised segmentation:** paired augmented views make it possible to use unlabelled imagery. This removes annotation cost, at the expense of producing a threshold-sensitive anomaly score rather than a directly supervised class probability.
 - **Multiscale cosine distance instead of raw pixel differencing:** feature distance is less sensitive to small spectral and appearance changes than pixel subtraction while retaining spatial detail. The trade-off is additional encoder passes and dependence on the quality and domain coverage of pretraining.
 - **Tiled inference with overlap blending:** large scenes are processed without requiring a full-scene tensor in memory. Overlap reduces tile-edge artifacts, while increasing runtime compared with one fully convolutional pass.
 - **AdamW with cosine learning-rate decay:** this is a stable default for contrastive pretraining and avoids hand-tuned step schedules. It does not guarantee the best result for every biome, so scene-level validation remains important.
@@ -82,7 +81,7 @@ xychart-beta
 | Accuracy | 0.662 |
 | AUROC | 0.980 |
 
-The high recall and lower precision indicate that the default threshold favors finding changed pixels and produces false positives on several scenes. Scene-level metrics, rather than patch-level metrics, should be used for comparisons.
+The high recall and lower precision indicate that the default threshold favors finding changed pixels and produces false positives on several scenes. These values are from synthetic data and should be treated as smoke-test quality evidence, not field performance.
 
 ### Latency
 
@@ -103,11 +102,11 @@ Power telemetry is **not currently recorded by this repository**, so no wattage 
 ## What is implemented
 
 - GeoTIFF/NumPy Sentinel-2 ingestion with per-band robust normalization and nodata masking.
-- Spatially aligned temporal-pair sampling and satellite-safe augmentation.
+- Single-image random patch sampling and satellite-safe augmentation.
 - SimCLR/NT-Xent self-supervised pretraining with a convolutional encoder.
 - Dense, multiscale feature-distance change maps.
-- Unsupervised thresholding (Otsu or percentile) and morphological cleanup.
-- Evaluation with IoU, F1, precision, recall, AUROC and average precision.
+- Unsupervised thresholding (Otsu or fixed threshold).
+- Evaluation with IoU, F1, precision, recall, accuracy, and AUROC.
 - Tiled inference for large scenes with overlap blending and GeoTIFF output.
 - Synthetic paired-scene generator and tests for a fully reproducible smoke run.
 - On-demand fetch of real Sentinel-2 L2A pairs from Microsoft Planetary Computer (`scripts/fetch_sentinel2.py`).
@@ -224,7 +223,7 @@ data/real/
     metadata.json
 ```
 
-Fetch several scenes into the same `--output` directory to build a real pretraining archive. Each acquisition is a cloud-free (or SCL-cloud-masked) composite, co-registered to a shared 10 m grid so change detection is meaningful. Pretrain and run change detection exactly as with synthetic data:
+Fetch several scenes into the same `--output` directory to build a real pretraining archive. Each acquisition is composited and projected to a shared 10 m grid to support change detection workflows. Pretrain and run change detection exactly as with synthetic data:
 
 ```bash
 python -m sat_change.train --data data/real --output outputs/pretrain --epochs 50
@@ -251,18 +250,34 @@ Change detection assumes pixel-level coregistration. Atmospheric differences, se
 
 ## Methodology
 
-During pretraining, two augmented views of the same patch are positives and all other batch samples are negatives. The encoder learns invariance to mild spectral jitter, flips, rotations, blur and small noise while retaining spatial structure. At inference, normalized dense features for before/after patches are compared by cosine distance. Fine and coarse encoder stages are upsampled and averaged, producing a pixel-level anomaly score. Otsu thresholding makes the final mask label-free.
+During pretraining, two augmented views of the same patch are positives and all other batch samples are negatives. The pretraining objective does **not** use before/after temporal pairs directly. The encoder learns invariance to mild spectral jitter, flips, rotations, blur and small noise while retaining spatial structure. At inference, normalized dense features for before/after patches are compared by cosine distance. Fine and coarse encoder stages are upsampled and averaged, producing a pixel-level anomaly score. Otsu thresholding makes the final mask label-free.
 
 For honest evaluation, split by **geographic scene**, not patches, to avoid spatial leakage. Fit any threshold only on a validation region and report results once on held-out geographies. In addition to F1/IoU, report precision-recall curves because change pixels are usually rare. Compare against raw spectral difference and index-difference baselines (NDVI/NDBI/NDWI) and stratify results by biome, season, cloud cover and change type.
 
 ## Limitations
 
-This is a research baseline, not an operational disaster product. It does not perform image registration or cloud masking internally. Contrastive features trained on a small local archive may not transfer across biomes. Floods are especially time-sensitive; use well-matched cloud-free pre/post composites and validate thresholds locally.
+This is a research baseline, not an operational disaster product.
+
+- Training is self-supervised representation learning on single images, not direct supervised land-use-change classification.
+- The model outputs a generic binary anomaly/change mask; it does not identify change type (for example urbanization vs deforestation).
+- `sat_change.train` does not currently consume manifests/splits (`scene`, `date`, `split`), so geographic train/val/test evaluation must be orchestrated externally.
+- Real-data evaluation is only possible when ground-truth masks are provided; bundled real examples are mainly for qualitative inspection.
+- The pipeline assumes before/after inputs are already coregistered to pixel level and can produce false positives when alignment is imperfect.
+- Per-image robust normalization and pairwise Otsu thresholding can drift across seasons/sensors and require local calibration.
+- Real-scene ingestion and cloud handling are useful but still need stricter QA before operational claims.
+
+Recommended improvements before claiming robust land-use-change performance:
+
+1. Add explicit geographic train/validation/test splits wired into training and evaluation.
+2. Add real-world benchmark datasets with trusted masks and report scene-level confidence intervals.
+3. Add baseline comparisons (spectral differencing, NDVI/NDBI/NDWI, simple supervised U-Net baseline).
+4. Add calibration strategy (validation-fit threshold, PR curves, operating points).
+5. Add stronger preprocessing QA (registration checks, cloud/shadow quality controls).
 
 ## Tests
 
 ```bash
-pytest -q
+python -m pytest -q
 ```
 
 ## Streamlit dashboard
