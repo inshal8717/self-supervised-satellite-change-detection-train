@@ -275,3 +275,7 @@ streamlit run app.py
 ```
 
 The dashboard selects a checkpoint from `outputs/`, accepts a registered before/after `.npy` or GeoTIFF pair, and displays the input images, dense change heatmap, binary mask, threshold, changed-pixel percentage, and optional IoU/F1/precision/recall/AUROC metrics when a ground-truth mask is provided. GeoTIFF inputs with CRS metadata also expose a geospatial changed-pixel layer and GeoTIFF downloads; NumPy inputs provide `.npy` downloads.
+
+## AI-assisted development
+
+This project was built with the help of AI coding agents. **GitHub Copilot** was used for in-editor code completion and inline suggestions, while **OpenCode** acted as an agentic terminal assistant for multi-step tasks such as scaffolding modules, refactoring the pipeline, writing tests, debugging training runs, and drafting documentation (including parts of this README). All AI-generated code was human-reviewed and validated by running the test suite (`pytest -q`) and the documented demo commands before being committed.
