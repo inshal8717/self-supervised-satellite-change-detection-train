@@ -2,6 +2,104 @@
 
 An end-to-end PyTorch pipeline that learns Sentinel-2 representations from **unlabelled imagery** with temporal contrastive pretraining, then detects change by comparing dense feature maps. Human labels are not required for training; optional masks are used only for evaluation and threshold calibration.
 
+**Repository version:** `0.1.0` (defined in `pyproject.toml` and `src/sat_change/__init__.py`)
+
+## The Problem
+
+Satellite change detection is useful for monitoring construction, land-use transitions, agriculture, and environmental events, but pixel-level labels are expensive and difficult to maintain across locations and seasons. This project provides a label-efficient baseline: it learns from temporal satellite imagery alone, produces dense change maps for registered image pairs, and supports both offline synthetic data and real Sentinel-2 L2A scenes.
+
+The value is an inspectable, reproducible workflow rather than a black-box prediction service. It includes ingestion, normalization, self-supervised training, tiled inference, unsupervised thresholding, geospatial output, and evaluation against masks when they are available.
+
+## The Architecture
+
+```mermaid
+flowchart LR
+    A[Sentinel-2 temporal images<br/>B02 B03 B04 B08] --> B[Read + robust<br/>per-band normalization]
+    B --> C[Aligned patch sampler<br/>satellite-safe augmentations]
+    C --> D1[View 1]
+    C --> D2[View 2]
+    D1 --> E[Shared convolutional encoder]
+    D2 --> E
+    E --> F[Global average pooling]
+    F --> G[128-D projection head]
+    G --> H[NT-Xent / SimCLR loss]
+    H --> E
+
+    B --> I[Before / after tiles]
+    I --> J[Shared encoder<br/>dense feature stages]
+    J --> K[Cosine feature distance<br/>at 3 scales]
+    K --> L[Upsample + average]
+    L --> M[Otsu or percentile threshold]
+    M --> N[Morphological cleanup]
+    N --> O[Change mask + GeoTIFF/NumPy score map]
+```
+
+The encoder is fully convolutional: a stem followed by three downsampling stages with widths `32 -> 64 -> 128 -> 256`. Its intermediate feature maps retain spatial information. During inference, distances between before/after features from all three stages are resized to the input resolution and averaged, which balances local detail with broader context.
+
+## Engineering Trade-offs
+
+- **Compact CNN instead of a large pretrained backbone:** the repository favors a small, dependency-light encoder that can train offline on modest hardware and preserve dense feature stages. A larger ResNet or transformer could improve transfer performance, but would add compute, memory, and pretrained-weight assumptions.
+- **Self-supervised NT-Xent instead of supervised segmentation:** paired augmented views make it possible to use unlabelled imagery. This removes annotation cost, at the expense of requiring careful temporal registration and producing a threshold-sensitive anomaly score rather than a directly supervised class probability.
+- **Multiscale cosine distance instead of raw pixel differencing:** feature distance is less sensitive to small spectral and appearance changes than pixel subtraction while retaining spatial detail. The trade-off is additional encoder passes and dependence on the quality and domain coverage of pretraining.
+- **Tiled inference with overlap blending:** large scenes are processed without requiring a full-scene tensor in memory. Overlap reduces tile-edge artifacts, while increasing runtime compared with one fully convolutional pass.
+- **AdamW with cosine learning-rate decay:** this is a stable default for contrastive pretraining and avoids hand-tuned step schedules. It does not guarantee the best result for every biome, so scene-level validation remains important.
+- **Unsupervised thresholding:** Otsu/percentile thresholds keep inference label-free, but thresholds can vary with season, sensor conditions, and scene content. For operational use, calibrate on a representative validation region.
+
+## Performance Metrics
+
+The figures below are generated from locally produced artifacts under `outputs/`. Those generated files are ignored by Git, so rerun the documented demo/training commands to reproduce them. They are representative synthetic-data results, not a claim of production accuracy.
+
+### Training loss
+
+Thirty-epoch run from `outputs/pretrain_30ep/history.json` (NT-Xent loss; lower is better):
+
+```mermaid
+xychart-beta
+    title "Contrastive training loss"
+    x-axis "Epoch" [1, 5, 10, 15, 20, 25, 30]
+    y-axis "NT-Xent loss" 0 --> 2
+    line [1.949, 1.007, 0.861, 0.726, 0.628, 0.555, 0.570]
+```
+
+### Detection quality
+
+Mean over eight synthetic scenes from `outputs/vegas_30ep.json`:
+
+```mermaid
+xychart-beta
+    title "Synthetic evaluation metrics"
+    x-axis ["IoU", "F1", "Precision", "Recall", "Accuracy", "AUROC"]
+    y-axis "Score" 0 --> 1
+    bar [0.274, 0.403, 0.281, 0.985, 0.662, 0.980]
+```
+
+| Metric | Mean |
+| --- | ---: |
+| IoU | 0.274 |
+| F1 | 0.403 |
+| Precision | 0.281 |
+| Recall | 0.985 |
+| Accuracy | 0.662 |
+| AUROC | 0.980 |
+
+The high recall and lower precision indicate that the default threshold favors finding changed pixels and produces false positives on several scenes. Scene-level metrics, rather than patch-level metrics, should be used for comparisons.
+
+### Latency
+
+A five-run CPU benchmark on one `128 x 128` synthetic pair using `outputs/pretrain_30ep/best.pt`, `tile_size=512`, `overlap=32`, and PyTorch `2.13.0+cpu` measured **42.9 ms mean latency** (38.2 ms minimum). Latency depends on image dimensions, tile count, CPU/GPU, and PyTorch version.
+
+```mermaid
+xychart-beta
+    title "Representative CPU inference latency"
+    x-axis ["Run 1", "Run 2", "Run 3", "Run 4", "Run 5"]
+    y-axis "Milliseconds" 0 --> 60
+    bar [38.3, 54.9, 42.0, 41.1, 38.2]
+```
+
+### Hardware power consumption
+
+Power telemetry is **not currently recorded by this repository**, so no wattage graph is included and no consumption value should be inferred from the latency benchmark. Measure the target machine separately (for example with GPU power telemetry or an external power meter) and report the device, workload, sampling interval, and average/peak watts alongside the latency results.
+
 ## What is implemented
 
 - GeoTIFF/NumPy Sentinel-2 ingestion with per-band robust normalization and nodata masking.
