@@ -276,6 +276,11 @@ streamlit run app.py
 
 The dashboard selects a checkpoint from `outputs/`, accepts a registered before/after `.npy` or GeoTIFF pair, and displays the input images, dense change heatmap, binary mask, threshold, changed-pixel percentage, and optional IoU/F1/precision/recall/AUROC metrics when a ground-truth mask is provided. GeoTIFF inputs with CRS metadata also expose a geospatial changed-pixel layer and GeoTIFF downloads; NumPy inputs provide `.npy` downloads.
 
-## AI-assisted development
+## Agentic development
 
-This project was built with the help of AI coding agents. **GitHub Copilot** was used for in-editor code completion and inline suggestions, while **OpenCode** acted as an agentic terminal assistant for multi-step tasks such as scaffolding modules, refactoring the pipeline, writing tests, debugging training runs, and drafting documentation (including parts of this README). All AI-generated code was human-reviewed and validated by running the test suite (`pytest -q`) and the documented demo commands before being committed.
+This project was built with heavy use of AI coding agents. **GitHub Copilot (Agent mode)** and **OpenCode** were both driven extensively to translate the system design into working code:
+
+- **GitHub Copilot (Agent mode)** implemented and refactored core components across files — the convolutional encoder, NT-Xent pretraining loop, multiscale feature-distance inference, evaluation metrics, and the Streamlit dashboard — proposing edits, generating boilerplate, and keeping implementations consistent with the architecture.
+- **OpenCode** acted as an autonomous terminal agent for multi-step engineering: scaffolding new modules and scripts, wiring data ingestion and synthetic-data generation, running and debugging training/inference commands, executing the test suite (`pytest -q`), and drafting documentation including this README.
+
+Human effort went into system design and goals rather than line-by-line authorship: defining the label-efficient self-supervised approach, the trade-offs documented above, and the reproducibility requirements — then directing both agents, reviewing their outputs, and validating behavior against the documented demo commands before each commit.
