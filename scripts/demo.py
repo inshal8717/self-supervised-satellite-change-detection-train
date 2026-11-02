@@ -1,60 +1,77 @@
+"""One-command end-to-end demo: generate or use data, pretrain briefly, evaluate.
+
+Uses real data from ``data/real`` when it contains image pairs and masks;
+otherwise generates synthetic scenes. Runs from any working directory.
+"""
+
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+REAL_ROOT = ROOT / "data" / "real"
+SYNTH_ROOT = ROOT / "data" / "synthetic"
+DEMO_OUT = ROOT / "outputs" / "demo"
+
 
 def run(*args: str) -> None:
-    subprocess.run([sys.executable, *args], check=True)
+    """Run a Python command from the repo root, with ``src/`` importable even if the package isn't installed."""
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(ROOT / "src"), os.environ.get("PYTHONPATH")]))}
+    subprocess.run([sys.executable, *args], check=True, cwd=ROOT, env=env)
 
 
-def has_real_data(root: str = "data/real") -> bool:
-    """Check if real satellite data exists with at least one pair and masks."""
-    r = Path(root)
-    if not r.is_dir():
-        return False
-    from sat_change.io import pair_images, discover_images
-    pairs = pair_images(r)
-    if not pairs:
-        return False
-    masks = any(p.suffix.lower() in {".tif", ".tiff", ".npy"} for p in r.rglob("masks/*"))
-    return masks
+def has_real_data() -> bool:
+    """True when ``data/real`` has at least one image pair and at least one mask."""
+    sys.path.insert(0, str(ROOT / "src"))
+    from sat_change.io import discover_masks, pair_images
+
+    return REAL_ROOT.is_dir() and bool(pair_images(REAL_ROOT)) and bool(discover_masks(REAL_ROOT))
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="End-to-end demo: auto-selects real satellite data if available, otherwise generates synthetic data.")
-    mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--real", action="store_true", help="Force real satellite data (requires data/real/ with images + masks)")
-    mode.add_argument("--synthetic", action="store_true", help="Force synthetic data (generates fresh scenes)")
-    a = p.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--real", action="store_true", help="use data/real (requires image pairs and masks)")
+    mode.add_argument("--synthetic", action="store_true", help="always generate fresh synthetic scenes")
+    args = parser.parse_args()
 
-    use_real = a.real or (not a.synthetic and has_real_data())
-    data_root = "data/real" if use_real else "data/synthetic"
-    images_dir = data_root
-    masks_dir = str(Path(data_root) / "masks") if use_real else str(Path(data_root) / "masks")
-
+    use_real = args.real or (not args.synthetic and has_real_data())
     if use_real:
+        data_root = REAL_ROOT
         print(f"Using real satellite data from {data_root}")
     else:
+        data_root = SYNTH_ROOT
         print("Generating synthetic data...")
-        run("scripts/make_synthetic.py", "--output", "data/synthetic", "--scenes", "8", "--size", "96")
-        images_dir = "data/synthetic/images"
-        masks_dir = "data/synthetic/masks"
+        run("scripts/make_synthetic.py", "--output", str(SYNTH_ROOT), "--scenes", "8", "--size", "96")
 
+    # Synthetic data keeps imagery in images/; real data is already per-scene.
+    images_dir = data_root if use_real else data_root / "images"
     print(f"Pretraining on {images_dir}...")
-    run("-m", "sat_change.train", "--data", images_dir, "--output", "outputs/demo", "--epochs", "2", "--samples-per-epoch", "128", "--batch-size", "16", "--patch-size", "48")
+    run(
+        "-m", "sat_change.train",
+        "--data", str(images_dir),
+        "--output", str(DEMO_OUT),
+        "--epochs", "2",
+        "--samples-per-epoch", "128",
+        "--batch-size", "16",
+        "--patch-size", "48",
+    )
 
-    has_masks = Path(masks_dir).is_dir() and any(Path(masks_dir).iterdir())
-    if has_masks:
-        print(f"Evaluating on {images_dir} with masks from {masks_dir}...")
-        run("-m", "sat_change.evaluate", "--images", images_dir, "--masks", masks_dir, "--checkpoint", "outputs/demo/best.pt", "--output", "outputs/demo/metrics.json")
-    else:
-        print("No ground-truth masks found — skipping evaluation (IoU/F1/AUROC unavailable).")
-        print("Provide masks via --mask during fetch_sentinel2.py for evaluation.")
+    # Masks are found recursively, so both the flat synthetic layout and the
+    # per-scene real layout are covered.
+    print(f"Evaluating on {data_root} with masks found under it...")
+    run(
+        "-m", "sat_change.evaluate",
+        "--images", str(data_root),
+        "--masks", str(data_root),
+        "--checkpoint", str(DEMO_OUT / "best.pt"),
+        "--output", str(DEMO_OUT / "metrics.json"),
+    )
 
 
 if __name__ == "__main__":
     main()
-

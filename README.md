@@ -40,7 +40,7 @@ The encoder is fully convolutional: a stem followed by three downsampling stages
 - **Compact CNN instead of a large pretrained backbone:** the repository favors a small, dependency-light encoder that can train offline on modest hardware and preserve dense feature stages. A larger ResNet or transformer could improve transfer performance, but would add compute, memory, and pretrained-weight assumptions.
 - **Self-supervised NT-Xent instead of supervised segmentation:** paired augmented views make it possible to use unlabelled imagery. This removes annotation cost, at the expense of producing a threshold-sensitive anomaly score rather than a directly supervised class probability.
 - **Multiscale cosine distance instead of raw pixel differencing:** feature distance is less sensitive to small spectral and appearance changes than pixel subtraction while retaining spatial detail. The trade-off is additional encoder passes and dependence on the quality and domain coverage of pretraining.
-- **Tiled inference with overlap blending:** large scenes are processed without requiring a full-scene tensor in memory. Overlap reduces tile-edge artifacts, while increasing runtime compared with one fully convolutional pass.
+- **Tiled inference with overlap blending:** the network runs tile by tile, so memory per forward pass stays bounded and overlap reduces tile-edge artifacts. Both input scenes are still read and normalized in full, so very large scenes also need enough RAM for the scene itself. Overlap increases runtime compared with one fully convolutional pass.
 - **AdamW with cosine learning-rate decay:** this is a stable default for contrastive pretraining and avoids hand-tuned step schedules. It does not guarantee the best result for every biome, so scene-level validation remains important.
 - **Unsupervised thresholding:** Otsu/percentile thresholds keep inference label-free, but thresholds can vary with season, sensor conditions, and scene content. For operational use, calibrate on a representative validation region.
 
@@ -85,7 +85,7 @@ The high recall and lower precision indicate that the default threshold favors f
 
 ### Latency
 
-A five-run CPU benchmark on one `128 x 128` synthetic pair using `outputs/pretrain_30ep/best.pt`, `tile_size=512`, `overlap=32`, and PyTorch `2.13.0+cpu` measured **42.9 ms mean latency** (38.2 ms minimum). Latency depends on image dimensions, tile count, CPU/GPU, and PyTorch version.
+A five-run CPU benchmark (a one-off timing script that is not included in the repository) on one `128 x 128` synthetic pair using `outputs/pretrain_30ep/best.pt`, `tile_size=512`, `overlap=32`, and PyTorch `2.13.0+cpu` measured **42.9 ms mean latency** (38.2 ms minimum). Latency depends on image dimensions, tile count, CPU/GPU, and PyTorch version.
 
 ```mermaid
 xychart-beta
@@ -108,7 +108,7 @@ Power telemetry is **not currently recorded by this repository**, so no wattage 
 - Unsupervised thresholding (Otsu or fixed threshold).
 - Evaluation with IoU, F1, precision, recall, accuracy, and AUROC.
 - Tiled inference for large scenes with overlap blending and GeoTIFF output.
-- Synthetic paired-scene generator and tests for a fully reproducible smoke run.
+- Synthetic paired-scene generator, unit tests, and an end-to-end smoke test (`tests/test_pipeline.py`).
 - On-demand fetch of real Sentinel-2 L2A pairs from Microsoft Planetary Computer (`scripts/fetch_sentinel2.py`).
 
 ## Data layout
@@ -124,7 +124,7 @@ data/
     dubai_2024-02-03.tif
 ```
 
-The default filename parser removes a trailing `YYYY-MM-DD` or `YYYYMMDD` to obtain the scene key. A CSV manifest can instead contain `path,scene,date,split`.
+The default filename parser removes a trailing `YYYY-MM-DD` or `YYYYMMDD` to obtain the scene key. Within a scene, the earliest and latest acquisitions form the before/after pair. Files in any `masks/` folder are treated as ground truth and are never used as imagery. A CSV manifest can instead contain `path,scene,date,split`, but the training code does not read it yet.
 
 Recommended Sentinel-2 L2A bands at 10 m are `B02,B03,B04,B08`. Resample other bands before stacking. Reflectance may be stored as `0..1` or Sentinel integer scale (`0..10000`); both are handled.
 
@@ -163,7 +163,7 @@ python -m sat_change.predict \
   --output outputs/scene000_change.npy
 ```
 
-Evaluate all synthetic pairs:
+Evaluate all synthetic pairs. Note that the quick start pretrains and evaluates on the same scenes, so these numbers are a smoke test, not held-out performance:
 
 ```bash
 python -m sat_change.evaluate \
@@ -200,16 +200,26 @@ Fetch a before/after pair over a 6 km area:
 
 ```bash
 python scripts/fetch_sentinel2.py \
-  --center=-115.2,36.1 \        # AOI center, lon,lat (quote on shells that eat '-')
-  --size 6 \                     # AOI side length in km
-  --before 2023-01-01/2023-03-31 # first acquisition window (ISO date range)
-  --after 2023-08-01/2023-10-31  # second acquisition window
-  --scene vegas \                # scene key used in all filenames
+  --center=-115.2,36.1 \
+  --size 6 \
+  --before 2023-01-01/2023-03-31 \
+  --after 2023-08-01/2023-10-31 \
+  --scene vegas \
   --output data/real \
-  --cloud-max 25 \               # max eo:cloud_cover per scene
-  --limit 3 \                    # median-composite up to 3 acquisitions per window
-  --mask path/to/change_mask.tif # optional ground-truth mask for evaluation
+  --cloud-max 25 \
+  --limit 3 \
+  --mask path/to/change_mask.tif
 ```
+
+| Option | Meaning |
+| --- | --- |
+| `--center` | AOI centre as `lon,lat`. Use the `=` form for negative longitudes. |
+| `--size` | AOI side length in km. |
+| `--before`, `--after` | Acquisition windows as ISO date ranges. |
+| `--scene` | Scene key used in all output filenames. |
+| `--cloud-max` | Maximum scene-level cloud cover (`eo:cloud_cover`) for candidate acquisitions. |
+| `--limit` | Number of acquisitions to median-composite per window. |
+| `--mask` | Optional ground-truth change mask (GeoTIFF) for evaluation. |
 
 Output layout (identical to the synthetic layout):
 
@@ -265,6 +275,8 @@ This is a research baseline, not an operational disaster product.
 - The pipeline assumes before/after inputs are already coregistered to pixel level and can produce false positives when alignment is imperfect.
 - Per-image robust normalization and pairwise Otsu thresholding can drift across seasons/sensors and require local calibration.
 - Real-scene ingestion and cloud handling are useful but still need stricter QA before operational claims.
+- `best.pt` is the checkpoint with the lowest *training* loss. There is no validation split, so it is not selected on held-out data.
+- Pretraining uses every image under the data root, including scenes you later evaluate on. Hold scenes out explicitly if you need a clean evaluation.
 
 Recommended improvements before claiming robust land-use-change performance:
 
@@ -291,11 +303,3 @@ streamlit run app.py
 
 The dashboard selects a checkpoint from `outputs/`, accepts a registered before/after `.npy` or GeoTIFF pair, and displays the input images, dense change heatmap, binary mask, threshold, changed-pixel percentage, and optional IoU/F1/precision/recall/AUROC metrics when a ground-truth mask is provided. GeoTIFF inputs with CRS metadata also expose a geospatial changed-pixel layer and GeoTIFF downloads; NumPy inputs provide `.npy` downloads.
 
-## Agentic development
-
-This project was built with heavy use of AI coding agents. **GitHub Copilot (Agent mode)** and **OpenCode** were both driven extensively to translate the system design into working code:
-
-- **GitHub Copilot (Agent mode)** implemented and refactored core components across files — the convolutional encoder, NT-Xent pretraining loop, multiscale feature-distance inference, evaluation metrics, and the Streamlit dashboard — proposing edits, generating boilerplate, and keeping implementations consistent with the architecture.
-- **OpenCode** acted as an autonomous terminal agent for multi-step engineering: scaffolding new modules and scripts, wiring data ingestion and synthetic-data generation, running and debugging training/inference commands, executing the test suite (`pytest -q`), and drafting documentation including this README.
-
-Human effort went into system design and goals rather than line-by-line authorship: defining the label-efficient self-supervised approach, the trade-offs documented above, and the reproducibility requirements — then directing both agents, reviewing their outputs, and validating behavior against the documented demo commands before each commit.
