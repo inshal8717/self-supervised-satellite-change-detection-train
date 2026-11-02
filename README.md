@@ -286,11 +286,15 @@ Recommended improvements before claiming robust land-use-change performance:
 4. Add calibration strategy (validation-fit threshold, PR curves, operating points).
 5. Add stronger preprocessing QA (registration checks, cloud/shadow quality controls).
 
-## Tests
+## Tests and lint
 
 ```bash
+pip install -e ".[geo,test,lint,dashboard]"
+ruff check .
 python -m pytest -q
 ```
+
+GitHub Actions runs both on every push and pull request (`.github/workflows/ci.yml`), on Python 3.10 and 3.12. The end-to-end test (`tests/test_pipeline.py`) runs the whole pipeline on tiny synthetic data in a few seconds on CPU.
 
 ## Streamlit dashboard
 

@@ -40,12 +40,12 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
-import pystac_client
 import rasterio
 from rasterio.transform import Affine
 from rasterio.warp import reproject, transform
 
-import planetary_computer
+# pystac_client and planetary_computer are imported where used, so the module
+# (and its tests) load without the network-only "fetch" extras.
 
 CATALOG_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 COLLECTION = "sentinel-2-l2a"
@@ -112,16 +112,30 @@ def _reproject(href: str, dst_crs: int, transform: Affine, height: int, width: i
     return out
 
 
-def _composite(items: Iterable, dst_crs: int, transform: Affine, height: int, width: int, use_scl: bool) -> np.ndarray:
+def _composite(
+    items: Iterable,
+    dst_crs: int,
+    transform: Affine,
+    height: int,
+    width: int,
+    use_scl: bool,
+    sign=None,
+) -> np.ndarray:
     """Median composite of the given acquisitions for one time window.
 
     Returns a (4, H, W) float32 array in Sentinel-2 integer scale (0..10000).
     Cloud, cirrus, shadow and nodata pixels (per SCL) are set to NaN so they
     are ignored by the median. Without SCL, only nodata is ignored.
+
+    ``sign`` signs asset URLs; it defaults to planetary_computer.sign.
     """
+    if sign is None:
+        import planetary_computer
+
+        sign = planetary_computer.sign
     stack = []
     for item in items:
-        item = planetary_computer.sign(item)
+        item = sign(item)
         bands = np.stack([
             _reproject(item.assets[b].href, dst_crs, transform, height, width, rasterio.enums.Resampling.bilinear)
             for b in BANDS
@@ -176,6 +190,8 @@ def main() -> None:
     dst_crs = _utm_epsg(lon, lat)
     transform, height, width = _target_grid(bbox, dst_crs, gsd=10)
     print(f"AOI bbox (deg): {bbox}  grid: {height}x{width} px at 10 m, EPSG:{dst_crs}")
+
+    import pystac_client
 
     catalog = pystac_client.Client.open(CATALOG_URL)
     scene_dir = Path(a.output) / a.scene

@@ -8,12 +8,15 @@ version = "0.1.0"
 description = "Self-supervised satellite change detection with temporal contrastive learning"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "torch>=2.1", "Pillow>=10"]
+dependencies = ["numpy>=1.24", "torch>=2.1"]
 
 [project.optional-dependencies]
+# GeoTIFF read/write. Needed by the tests for fetch and GeoTIFF I/O.
 geo = ["rasterio>=1.3"]
+# Live Sentinel-2 download (network access required).
 fetch = ["rasterio>=1.3", "pystac-client>=0.8", "planetary-computer>=1.0"]
 test = ["pytest>=7"]
+lint = ["ruff>=0.5"]
 dashboard = ["streamlit>=1.38", "plotly>=5.22"]
 
 [tool.setuptools.packages.find]
@@ -22,3 +25,13 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["data", "outputs"]
+
+[tool.ruff.lint]
+# Pyflakes (unused imports, undefined names) and syntax errors. Style rules
+# can be added once the code has settled.
+select = ["E9", "F"]
