@@ -1,3 +1,9 @@
+"""Reading, writing and discovering satellite imagery.
+
+Imagery is C x H x W, stored as ``.npy`` or ``.tif``/``.tiff``. Ground-truth
+masks live in directories named ``masks`` and are never treated as imagery.
+"""
+
 from __future__ import annotations
 
 import re
@@ -6,19 +12,19 @@ from typing import Any
 
 import numpy as np
 
+IMAGE_SUFFIXES = {".npy", ".tif", ".tiff"}
+MASK_DIR_NAME = "masks"
+
 
 def read_image(path: str | Path) -> tuple[np.ndarray, dict[str, Any]]:
-    """Read CxHxW imagery and return array plus geospatial profile."""
+    """Read a C x H x W array and its geospatial profile (empty for ``.npy``)."""
     path = Path(path)
     if path.suffix.lower() == ".npy":
         arr = np.load(path).astype(np.float32)
         if arr.ndim == 2:
             arr = arr[None]
         return arr, {}
-    try:
-        import rasterio
-    except ImportError as exc:
-        raise RuntimeError("GeoTIFF support requires: pip install -e '.[geo]'") from exc
+    rasterio = _import_rasterio()
     with rasterio.open(path) as src:
         arr = src.read().astype(np.float32)
         profile = src.profile.copy()
@@ -28,15 +34,13 @@ def read_image(path: str | Path) -> tuple[np.ndarray, dict[str, Any]]:
 
 
 def write_image(path: str | Path, arr: np.ndarray, profile: dict[str, Any] | None = None) -> None:
+    """Write a 2-D or C x H x W array as ``.npy`` or GeoTIFF."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() == ".npy":
         np.save(path, arr.astype(np.float32))
         return
-    try:
-        import rasterio
-    except ImportError as exc:
-        raise RuntimeError("GeoTIFF support requires: pip install -e '.[geo]'") from exc
+    rasterio = _import_rasterio()
     data = arr[None] if arr.ndim == 2 else arr
     out_profile = dict(profile or {})
     out_profile.update(driver="GTiff", height=data.shape[-2], width=data.shape[-1], count=data.shape[0], dtype="float32", compress="deflate")
@@ -45,10 +49,13 @@ def write_image(path: str | Path, arr: np.ndarray, profile: dict[str, Any] | Non
 
 
 def normalize_reflectance(arr: np.ndarray) -> np.ndarray:
-    """Robust per-band normalization preserving nodata as zeros."""
+    """Scale each band to [0, 1] using its 2nd-98th percentiles.
+
+    Sentinel-2 integer reflectance (0..10000) is detected and rescaled first.
+    NaN (nodata) pixels become 0.
+    """
     x = arr.astype(np.float32, copy=True)
-    finite = np.isfinite(x)
-    if finite.any() and np.nanpercentile(x, 99) > 2:
+    if np.isfinite(x).any() and np.nanpercentile(x, 99) > 2:
         x /= 10000.0
     for band in range(x.shape[0]):
         valid = np.isfinite(x[band])
@@ -61,15 +68,28 @@ def normalize_reflectance(arr: np.ndarray) -> np.ndarray:
 
 
 def scene_key(path: str | Path) -> str:
+    """Scene name with a trailing YYYY-MM-DD / YYYYMMDD date removed."""
     return re.sub(r"[-_]?\d{4}[-]?\d{2}[-]?\d{2}$", "", Path(path).stem)
 
 
 def discover_images(root: str | Path) -> list[Path]:
-    root = Path(root)
-    return sorted(p for p in root.rglob("*") if p.suffix.lower() in {".npy", ".tif", ".tiff"})
+    """All imagery under ``root``, excluding anything inside a ``masks`` directory."""
+    return sorted(
+        p for p in Path(root).rglob("*")
+        if p.suffix.lower() in IMAGE_SUFFIXES and MASK_DIR_NAME not in p.parent.parts
+    )
+
+
+def discover_masks(root: str | Path) -> list[Path]:
+    """Mask files under ``root``: any imagery inside a ``masks`` directory."""
+    return sorted(
+        p for p in Path(root).rglob("*")
+        if p.suffix.lower() in IMAGE_SUFFIXES and MASK_DIR_NAME in p.parent.parts
+    )
 
 
 def pair_images(root: str | Path) -> list[tuple[Path, Path]]:
+    """Pair the earliest and latest acquisition of each scene under ``root``."""
     groups: dict[str, list[Path]] = {}
     for path in discover_images(root):
         groups.setdefault(scene_key(path), []).append(path)
@@ -79,3 +99,11 @@ def pair_images(root: str | Path) -> list[tuple[Path, Path]]:
         if len(paths) >= 2:
             pairs.append((paths[0], paths[-1]))
     return pairs
+
+
+def _import_rasterio():
+    try:
+        import rasterio
+    except ImportError as exc:
+        raise RuntimeError("GeoTIFF support requires: pip install -e '.[geo]'") from exc
+    return rasterio

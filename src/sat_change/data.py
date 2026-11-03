@@ -12,7 +12,7 @@ from .io import discover_images, normalize_reflectance, read_image
 
 
 def augment(x: torch.Tensor) -> torch.Tensor:
-    """Satellite-safe spatial and spectral augmentation."""
+    """Satellite-safe spatial and spectral augmentation for one C x H x W patch."""
     if random.random() < 0.5:
         x = x.flip(-1)
     if random.random() < 0.5:
@@ -29,17 +29,27 @@ def augment(x: torch.Tensor) -> torch.Tensor:
 
 
 class ContrastivePatchDataset(Dataset):
+    """Yields two augmented views of a random patch from a random image.
+
+    Masks are excluded from discovery, so only imagery is sampled.
+    """
+
     def __init__(self, root: str | Path, patch_size: int = 64, samples_per_epoch: int = 4096, bands: int = 4):
         self.paths = discover_images(root)
         if not self.paths:
-            raise ValueError(f"No .npy/.tif imagery found in {root}")
-        self.patch_size, self.samples_per_epoch, self.bands = patch_size, samples_per_epoch, bands
+            raise ValueError(f"No .npy/.tif imagery found in {root} (masks are excluded)")
+        self.patch_size = patch_size
+        self.samples_per_epoch = samples_per_epoch
+        self.bands = bands
 
     def __len__(self) -> int:
         return self.samples_per_epoch
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        arr, _ = read_image(self.paths[index % len(self.paths)])
+        path = self.paths[index % len(self.paths)]
+        arr, _ = read_image(path)
+        if arr.shape[0] < self.bands:
+            raise ValueError(f"{path} has {arr.shape[0]} band(s); the model expects {self.bands}")
         arr = normalize_reflectance(arr[: self.bands])
         _, h, w = arr.shape
         if min(h, w) < self.patch_size:

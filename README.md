@@ -1,301 +1,210 @@
 # Self-Supervised Satellite Change Detection
 
-An end-to-end PyTorch pipeline that learns Sentinel-2 representations from **unlabelled imagery** with SimCLR-style contrastive pretraining (two augmented views of the same patch), then detects change by comparing dense feature maps from before/after imagery. Human labels are not required for training; optional masks are used only for evaluation and threshold calibration.
+[![CI](https://github.com/inshal8717/self-supervised-satellite-change-detection-train/actions/workflows/ci.yml/badge.svg)](https://github.com/inshal8717/self-supervised-satellite-change-detection-train/actions/workflows/ci.yml)
 
-**Repository version:** `0.1.0` (defined in `pyproject.toml` and `src/sat_change/__init__.py`)
+A PyTorch pipeline that pretrains a convolutional encoder on **unlabelled** Sentinel-2 imagery with SimCLR-style
+contrastive learning, then flags change by comparing dense feature maps from before and after images. Training needs
+no change labels. Ground-truth masks are used only for evaluation.
 
-## The Problem
+**Project page:** https://inshal8717.github.io/self-supervised-satellite-change-detection-train/
 
-Satellite change detection is useful for monitoring construction, land-use transitions, agriculture, and environmental events, but pixel-level labels are expensive and difficult to maintain across locations and seasons. This project provides a label-efficient baseline: it learns generic multispectral features from unlabelled satellite imagery, produces dense change/anomaly maps for registered image pairs, and supports both offline synthetic data and real Sentinel-2 L2A scenes.
+> **Status: research baseline with a negative result.** On held-out synthetic scenes, the pretrained encoder does not
+> yet beat a plain per-pixel spectral difference (table below). Earlier figures in this repository (AUROC 0.98) were
+> measured on the same scenes the model was trained on, and are withdrawn.
 
-The value is an inspectable, reproducible workflow rather than a black-box prediction service. It includes ingestion, normalization, self-supervised training, tiled inference, unsupervised thresholding, geospatial output, and evaluation against masks when they are available.
+## Results on held-out synthetic scenes
 
-## The Architecture
+The encoder was pretrained on scenes 0–7 and scored on scenes 8–11, which it never saw. All three methods use the same
+scenes and the same per-scene Otsu threshold. Reproduce with `python scripts/reproduce_results.py`.
+
+| Method | AUROC | F1 | IoU | Precision | Recall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Trained encoder | 0.491 | 0.181 | 0.101 | 0.103 | 0.798 |
+| Random-weight encoder (same architecture) | 0.702 | 0.529 | 0.449 | 0.477 | 0.673 |
+| Spectral difference (per-pixel L2) | **0.740** | 0.240 | 0.138 | 0.144 | 0.757 |
+
+An AUROC near 0.5 is chance. The scenes are synthetic, with flat, distinct changed regions and mild noise, so real
+performance will be lower. These numbers check that the pipeline runs and measure how the methods compare. They do not
+measure real-world accuracy. The page at the link above shows the training curve and per-scene results.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    A[Sentinel-2 temporal images<br/>B02 B03 B04 B08] --> B[Read + robust<br/>per-band normalization]
-    B --> C[Single-image patch sampler<br/>satellite-safe augmentations]
-    C --> D1[View 1]
-    C --> D2[View 2]
-    D1 --> E[Shared convolutional encoder]
-    D2 --> E
-    E --> F[Global average pooling]
-    F --> G[128-D projection head]
-    G --> H[NT-Xent / SimCLR loss]
+    A[Sentinel-2 images<br/>B02 B03 B04 B08] --> B[Per-band robust normalisation]
+    B --> C[Random patch + two augmented views]
+    C --> E[Shared CNN encoder]
+    E --> H[NT-Xent contrastive loss]
     H --> E
 
-    B --> I[Before / after tiles]
-    I --> J[Shared encoder<br/>dense feature stages]
-    J --> K[Cosine feature distance<br/>at 3 scales]
-    K --> L[Upsample + average]
-    L --> M[Otsu or percentile threshold]
-    M --> O[Change mask + GeoTIFF/NumPy score map]
+    B --> I[Before / after scenes]
+    I --> J[Same encoder, dense features at 3 scales]
+    J --> K[Cosine distance, upsampled and averaged]
+    K --> L[Otsu threshold]
+    L --> M[Change mask and score map]
 ```
 
-The encoder is fully convolutional: a stem followed by three downsampling stages with widths `32 -> 64 -> 128 -> 256`. Its intermediate feature maps retain spatial information. During inference, distances between before/after features from all three stages are resized to the input resolution and averaged, which balances local detail with broader context.
-
-## Engineering Trade-offs
-
-- **Compact CNN instead of a large pretrained backbone:** the repository favors a small, dependency-light encoder that can train offline on modest hardware and preserve dense feature stages. A larger ResNet or transformer could improve transfer performance, but would add compute, memory, and pretrained-weight assumptions.
-- **Self-supervised NT-Xent instead of supervised segmentation:** paired augmented views make it possible to use unlabelled imagery. This removes annotation cost, at the expense of producing a threshold-sensitive anomaly score rather than a directly supervised class probability.
-- **Multiscale cosine distance instead of raw pixel differencing:** feature distance is less sensitive to small spectral and appearance changes than pixel subtraction while retaining spatial detail. The trade-off is additional encoder passes and dependence on the quality and domain coverage of pretraining.
-- **Tiled inference with overlap blending:** large scenes are processed without requiring a full-scene tensor in memory. Overlap reduces tile-edge artifacts, while increasing runtime compared with one fully convolutional pass.
-- **AdamW with cosine learning-rate decay:** this is a stable default for contrastive pretraining and avoids hand-tuned step schedules. It does not guarantee the best result for every biome, so scene-level validation remains important.
-- **Unsupervised thresholding:** Otsu/percentile thresholds keep inference label-free, but thresholds can vary with season, sensor conditions, and scene content. For operational use, calibrate on a representative validation region.
-
-## Performance Metrics
-
-The figures below are generated from locally produced artifacts under `outputs/`. Those generated files are ignored by Git, so rerun the documented demo/training commands to reproduce them. They are representative synthetic-data results, not a claim of production accuracy.
-
-### Training loss
-
-Thirty-epoch run from `outputs/pretrain_30ep/history.json` (NT-Xent loss; lower is better):
-
-```mermaid
-xychart-beta
-    title "Contrastive training loss"
-    x-axis "Epoch" [1, 5, 10, 15, 20, 25, 30]
-    y-axis "NT-Xent loss" 0 --> 2
-    line [1.949, 1.007, 0.861, 0.726, 0.628, 0.555, 0.570]
-```
-
-### Detection quality
-
-Mean over eight synthetic scenes from `outputs/vegas_30ep.json`:
-
-```mermaid
-xychart-beta
-    title "Synthetic evaluation metrics"
-    x-axis ["IoU", "F1", "Precision", "Recall", "Accuracy", "AUROC"]
-    y-axis "Score" 0 --> 1
-    bar [0.274, 0.403, 0.281, 0.985, 0.662, 0.980]
-```
-
-| Metric | Mean |
-| --- | ---: |
-| IoU | 0.274 |
-| F1 | 0.403 |
-| Precision | 0.281 |
-| Recall | 0.985 |
-| Accuracy | 0.662 |
-| AUROC | 0.980 |
-
-The high recall and lower precision indicate that the default threshold favors finding changed pixels and produces false positives on several scenes. These values are from synthetic data and should be treated as smoke-test quality evidence, not field performance.
-
-### Latency
-
-A five-run CPU benchmark on one `128 x 128` synthetic pair using `outputs/pretrain_30ep/best.pt`, `tile_size=512`, `overlap=32`, and PyTorch `2.13.0+cpu` measured **42.9 ms mean latency** (38.2 ms minimum). Latency depends on image dimensions, tile count, CPU/GPU, and PyTorch version.
-
-```mermaid
-xychart-beta
-    title "Representative CPU inference latency"
-    x-axis ["Run 1", "Run 2", "Run 3", "Run 4", "Run 5"]
-    y-axis "Milliseconds" 0 --> 60
-    bar [38.3, 54.9, 42.0, 41.1, 38.2]
-```
-
-### Hardware power consumption
-
-Power telemetry is **not currently recorded by this repository**, so no wattage graph is included and no consumption value should be inferred from the latency benchmark. Measure the target machine separately (for example with GPU power telemetry or an external power meter) and report the device, workload, sampling interval, and average/peak watts alongside the latency results.
-
-## What is implemented
-
-- GeoTIFF/NumPy Sentinel-2 ingestion with per-band robust normalization and nodata masking.
-- Single-image random patch sampling and satellite-safe augmentation.
-- SimCLR/NT-Xent self-supervised pretraining with a convolutional encoder.
-- Dense, multiscale feature-distance change maps.
-- Unsupervised thresholding (Otsu or fixed threshold).
-- Evaluation with IoU, F1, precision, recall, accuracy, and AUROC.
-- Tiled inference for large scenes with overlap blending and GeoTIFF output.
-- Synthetic paired-scene generator and tests for a fully reproducible smoke run.
-- On-demand fetch of real Sentinel-2 L2A pairs from Microsoft Planetary Computer (`scripts/fetch_sentinel2.py`).
-
-## Data layout
-
-Each acquisition is a multiband `.tif`/`.tiff` or `.npy` array (`C,H,W`). Files with the same scene key and different dates form temporal pairs:
-
-```text
-data/
-  train/
-    amazon_2023-01-12.tif
-    amazon_2023-08-20.tif
-    dubai_2023-02-01.tif
-    dubai_2024-02-03.tif
-```
-
-The default filename parser removes a trailing `YYYY-MM-DD` or `YYYYMMDD` to obtain the scene key. A CSV manifest can instead contain `path,scene,date,split`.
-
-Recommended Sentinel-2 L2A bands at 10 m are `B02,B03,B04,B08`. Resample other bands before stacking. Reflectance may be stored as `0..1` or Sentinel integer scale (`0..10000`); both are handled.
-
-## Install
-
-Python 3.10+ is recommended.
-
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-source .venv/bin/activate
-pip install -e ".[geo,test]"
-```
+The encoder is fully convolutional: a stem and three stride-2 stages with widths `32 → 64 → 128 → 256`. Feature
+distances from all three stages are resized to the input size and averaged.
 
 ## Quick start
 
-Generate deterministic synthetic imagery (including evaluation masks):
+Requires Python 3.10 or newer. CPU is enough.
 
 ```bash
-python scripts/make_synthetic.py --output data/synthetic --scenes 12 --size 128
+pip install -e ".[geo,test,lint,dashboard]"
+
+# Smoke test: 2 epochs on 8 synthetic scenes, about a minute on CPU
+python scripts/demo.py --synthetic
+
+# Full held-out experiment and the project page data (a few minutes on CPU)
+python scripts/reproduce_results.py
+python scripts/build_site.py      # writes docs/index.html
+
+# Interactive dashboard at http://localhost:8501
+streamlit run app.py
 ```
 
-Pretrain on all single-date images:
+Running `scripts/demo.py` on its own (without `--synthetic`) uses `data/real` when it holds image pairs and masks, and
+generates synthetic data otherwise.
 
-```bash
-python -m sat_change.train --data data/synthetic/images --output outputs/pretrain --epochs 10 --batch-size 32
-```
-
-Run change detection on a registered pair:
+### Run change detection on your own pair
 
 ```bash
 python -m sat_change.predict \
-  --before data/synthetic/images/scene000_20230101.npy \
-  --after data/synthetic/images/scene000_20240101.npy \
-  --checkpoint outputs/pretrain/best.pt \
-  --output outputs/scene000_change.npy
+  --before before.tif --after after.tif \
+  --checkpoint outputs/demo/best.pt \
+  --output outputs/change.tif
 ```
 
-Evaluate all synthetic pairs:
+This writes the score map, a binary mask (`change_mask.tif`), and a JSON summary. Use `--threshold` to set a fixed
+threshold instead of Otsu.
 
-```bash
-python -m sat_change.evaluate \
-  --images data/synthetic/images \
-  --masks data/synthetic/masks \
-  --checkpoint outputs/pretrain/best.pt \
-  --output outputs/metrics.json
-```
+## Data layout
 
-For a one-command end-to-end demo, run `python scripts/demo.py`. The demo automatically detects whether real satellite data exists in `data/real/` with ground-truth masks; if so, it uses that, otherwise it generates synthetic data. Use `--real` to force real data or `--synthetic` to force synthetic.
-
-```bash
-# Auto-detect (real if available, else synthetic)
-python scripts/demo.py
-
-# Force real satellite data (requires data/real/ with images + masks)
-python scripts/demo.py --real
-
-# Force synthetic data (always generates fresh scenes)
-python scripts/demo.py --synthetic
-```
-
-## Real satellite data
-
-The repo ships with a synthetic-data generator so the full pipeline runs offline, but you can fetch **real, open Sentinel-2 imagery** straight from Microsoft Planetary Computer — no account or API key required. `scripts/fetch_sentinel2.py` downloads surface-reflectance acquisitions (`B02/B03/B04/B08` at 10 m) for any location and two time windows, co-registers both to a common 10 m UTM grid, and writes them in the layout the pipeline expects (including an optional change mask and a CSV manifest).
-
-Install the fetch dependencies:
-
-```bash
-pip install -e ".[fetch]"
-```
-
-Fetch a before/after pair over a 6 km area:
-
-```bash
-python scripts/fetch_sentinel2.py \
-  --center=-115.2,36.1 \        # AOI center, lon,lat (quote on shells that eat '-')
-  --size 6 \                     # AOI side length in km
-  --before 2023-01-01/2023-03-31 # first acquisition window (ISO date range)
-  --after 2023-08-01/2023-10-31  # second acquisition window
-  --scene vegas \                # scene key used in all filenames
-  --output data/real \
-  --cloud-max 25 \               # max eo:cloud_cover per scene
-  --limit 3 \                    # median-composite up to 3 acquisitions per window
-  --mask path/to/change_mask.tif # optional ground-truth mask for evaluation
-```
-
-Output layout (identical to the synthetic layout):
+Imagery is `C × H × W`, as `.npy` or `.tif`/`.tiff`. Images with the same scene key and different dates form a pair.
+The scene key is the filename with its trailing date removed. Within a scene, the earliest and latest acquisitions form
+the before/after pair. Anything inside a `masks/` folder is ground truth and is never used as imagery.
 
 ```text
 data/real/
   vegas/
     images/vegas_2023-03-31.tif
     images/vegas_2023-09-07.tif
-    masks/vegas.tif              # only if --mask was given
-    manifest.csv
-    metadata.json
+    masks/vegas.tif        # optional, for evaluation
 ```
 
-Fetch several scenes into the same `--output` directory to build a real pretraining archive. Each acquisition is composited and projected to a shared 10 m grid to support change detection workflows. Pretrain and run change detection exactly as with synthetic data:
+Sentinel-2 L2A bands `B02, B03, B04, B08` at 10 m are the expected inputs. Reflectance can be `0..1` or Sentinel's
+integer scale (`0..10000`).
+
+## Real satellite data
+
+`scripts/fetch_sentinel2.py` downloads Sentinel-2 L2A surface reflectance from Microsoft Planetary Computer. It needs
+no account or API key, and it co-registers both dates onto one 10 m UTM grid. Install the extras first with
+`pip install -e ".[fetch]"`.
 
 ```bash
-python -m sat_change.train --data data/real --output outputs/pretrain --epochs 50
-python -m sat_change.predict \
-  --before data/real/vegas/images/vegas_2023-03-31.tif \
-  --after  data/real/vegas/images/vegas_2023-09-07.tif \
-  --checkpoint outputs/pretrain/best.pt \
-  --output outputs/vegas_change.tif
+python scripts/fetch_sentinel2.py \
+  --center=-115.2,36.1 \
+  --size 6 \
+  --before 2023-01-01/2023-03-31 \
+  --after 2023-08-01/2023-10-31 \
+  --scene vegas \
+  --output data/real \
+  --cloud-max 25 \
+  --limit 3 \
+  --mask path/to/change_mask.tif
 ```
 
-For honest evaluation you need ground-truth change masks. Provide one per scene via `--mask` during the fetch (or export masks yourself); without masks you can still inspect the dense score maps but IoU/F1/AUROC are unavailable.
+| Option | Meaning |
+| --- | --- |
+| `--center` | AOI centre as `lon,lat`. Use the `=` form for negative longitudes. |
+| `--size` | AOI side length in km. |
+| `--before`, `--after` | Acquisition windows as ISO date ranges. |
+| `--scene` | Scene key used in all output filenames. |
+| `--cloud-max` | Maximum scene-level cloud cover for candidate acquisitions. |
+| `--limit` | Acquisitions to median-composite per window. Clouds, shadows and nodata are excluded (SCL mask). |
+| `--mask` | Optional ground-truth change mask (GeoTIFF), written for evaluation. |
 
-## Google Earth Engine export
+Without a mask you can still inspect the score maps, but IoU, F1 and AUROC are not computed.
 
-If you prefer GEE (or need a very specific date), you can export the same inputs there:
-
-1. Filter `COPERNICUS/S2_SR_HARMONIZED` by AOI, date and cloud percentage.
-2. Mask clouds using `COPERNICUS/S2_CLOUD_PROBABILITY` (and optionally SCL).
-3. Create a median/medoid composite for each time window.
-4. Select `B2,B3,B4,B8`, reproject both composites to the **same CRS, affine transform and 10 m grid**, and export each as GeoTIFF.
-5. Name both files with a common scene key and acquisition-window date.
-
-Change detection assumes pixel-level coregistration. Atmospheric differences, seasonal phenology, clouds, shadows and acquisition-angle differences can otherwise dominate the learned distance.
+To export the same inputs from Google Earth Engine instead, filter `COPERNICUS/S2_SR_HARMONIZED` by area, date and
+cloud cover, mask clouds, make one composite per window, reproject both to the same grid, and name the files with the
+scene key and window date.
 
 ## Methodology
 
-During pretraining, two augmented views of the same patch are positives and all other batch samples are negatives. The pretraining objective does **not** use before/after temporal pairs directly. The encoder learns invariance to mild spectral jitter, flips, rotations, blur and small noise while retaining spatial structure. At inference, normalized dense features for before/after patches are compared by cosine distance. Fine and coarse encoder stages are upsampled and averaged, producing a pixel-level anomaly score. Otsu thresholding makes the final mask label-free.
+Two augmented views of the same patch are positives. All other samples in the batch are negatives. Pretraining never
+sees before/after pairs, so it learns from single images. Augmentations are flips, rotations, mild gain and bias
+jitter, noise and blur, which keep spatial structure. At inference, normalised features for the two dates are compared
+with cosine distance at three scales. The scales are upsampled and averaged, and Otsu thresholding gives a
+label-free mask.
 
-For honest evaluation, split by **geographic scene**, not patches, to avoid spatial leakage. Fit any threshold only on a validation region and report results once on held-out geographies. In addition to F1/IoU, report precision-recall curves because change pixels are usually rare. Compare against raw spectral difference and index-difference baselines (NDVI/NDBI/NDWI) and stratify results by biome, season, cloud cover and change type.
+**Evaluation caveats:** the held-out split is by scene, not by patch, which avoids spatial leakage. Each scene's
+threshold is chosen by Otsu on that scene's own scores, so no label is used. Thresholds fitted on a separate validation
+region would be more honest for deployment. Report precision-recall curves as well as F1, because changed pixels are
+rare.
+
+## Engineering trade-offs
+
+- **Small CNN instead of a large pretrained backbone:** it trains on a CPU and keeps dense feature stages. A larger
+  model might transfer better, at the cost of compute and pretrained-weight assumptions.
+- **Self-supervised instead of supervised:** no annotation is needed. The price is a threshold-sensitive anomaly score,
+  not a calibrated class probability.
+- **Tiled inference with overlap:** the network runs tile by tile, which bounds memory per forward pass. Both input
+  scenes are still loaded in full, and overlap adds runtime.
+- **Per-image normalisation:** each date is normalised by its own percentiles. That is simple, but a change in scene
+  composition can shift both images' scales, so it can create false change.
+- **AdamW with cosine decay:** a stable default for contrastive training. It is not tuned for any particular biome.
 
 ## Limitations
 
-This is a research baseline, not an operational disaster product.
+This is a research baseline, not an operational product.
 
-- Training is self-supervised representation learning on single images, not direct supervised land-use-change classification.
-- The model outputs a generic binary anomaly/change mask; it does not identify change type (for example urbanization vs deforestation).
-- `sat_change.train` does not currently consume manifests/splits (`scene`, `date`, `split`), so geographic train/val/test evaluation must be orchestrated externally.
-- Real-data evaluation is only possible when ground-truth masks are provided; bundled real examples are mainly for qualitative inspection.
-- The pipeline assumes before/after inputs are already coregistered to pixel level and can produce false positives when alignment is imperfect.
-- Per-image robust normalization and pairwise Otsu thresholding can drift across seasons/sensors and require local calibration.
-- Real-scene ingestion and cloud handling are useful but still need stricter QA before operational claims.
+- On held-out synthetic scenes it does not beat a simple spectral difference (see Results).
+- It has not been evaluated on real labelled change data. Public benchmarks with trusted masks are the necessary next step.
+- The model outputs a binary change mask. It does not identify the type of change.
+- Inputs must already be co-registered at pixel level. Misalignment produces false positives.
+- `sat_change.train` does not read manifests or splits. The held-out split is set up by `scripts/reproduce_results.py`.
+- `best.pt` is the checkpoint with the lowest training loss. There is no validation set, so it is not chosen on held-out data.
+- Pretraining uses every image under the data root, including scenes you later evaluate on, unless you split them
+  as the reproduction script does.
 
-Recommended improvements before claiming robust land-use-change performance:
+Next steps, in order of value:
 
-1. Add explicit geographic train/validation/test splits wired into training and evaluation.
-2. Add real-world benchmark datasets with trusted masks and report scene-level confidence intervals.
-3. Add baseline comparisons (spectral differencing, NDVI/NDBI/NDWI, simple supervised U-Net baseline).
-4. Add calibration strategy (validation-fit threshold, PR curves, operating points).
-5. Add stronger preprocessing QA (registration checks, cloud/shadow quality controls).
+1. Test on real labelled change data (for example, public building or deforestation masks).
+2. Compare against more baselines: NDVI/NDBI/NDWI differences, and a small supervised U-Net trained on the same scenes.
+3. Tune the pretraining budget and the number of scenes, and check whether the random-encoder result depends on the architecture.
+4. Calibrate the threshold on a validation region, and report precision-recall curves.
 
-## Tests
+## Tests and lint
 
 ```bash
+pip install -e ".[geo,test,lint,dashboard]"
+ruff check .
 python -m pytest -q
 ```
 
-## Streamlit dashboard
+CI runs both on every push and pull request, on Python 3.10 and 3.12 (`.github/workflows/ci.yml`). The suite has 24
+tests, including an end-to-end run on tiny synthetic data that finishes in a few seconds on a CPU.
 
-Install the dashboard extras and launch the interactive frontend:
+## Dashboard
 
-```bash
-pip install -e ".[geo,dashboard]"
-streamlit run app.py
+`streamlit run app.py` lets you choose a checkpoint from `outputs/`, upload a before/after pair (`.npy` or GeoTIFF),
+and optionally upload a mask. It shows the inputs, the dense change heatmap, the binary mask, the threshold and the
+changed fraction. With a mask, it also shows IoU, F1, precision, recall and AUROC. GeoTIFF inputs with CRS metadata
+get a map of changed pixels and GeoTIFF downloads. The dashboard runs locally only, and is not hosted.
+
+## Project layout
+
+```text
+src/sat_change/     library: io, data, model, train, runtime, metrics, predict, evaluate
+scripts/            synthetic data, demo, Sentinel-2 fetch, held-out reproduction, project page builder
+app.py              Streamlit dashboard
+docs/               static project page (GitHub Pages)
+tests/              unit tests and an end-to-end smoke test
 ```
 
-The dashboard selects a checkpoint from `outputs/`, accepts a registered before/after `.npy` or GeoTIFF pair, and displays the input images, dense change heatmap, binary mask, threshold, changed-pixel percentage, and optional IoU/F1/precision/recall/AUROC metrics when a ground-truth mask is provided. GeoTIFF inputs with CRS metadata also expose a geospatial changed-pixel layer and GeoTIFF downloads; NumPy inputs provide `.npy` downloads.
+## License
 
-## Agentic development
-
-This project was built with heavy use of AI coding agents. **GitHub Copilot (Agent mode)** and **OpenCode** were both driven extensively to translate the system design into working code:
-
-- **GitHub Copilot (Agent mode)** implemented and refactored core components across files — the convolutional encoder, NT-Xent pretraining loop, multiscale feature-distance inference, evaluation metrics, and the Streamlit dashboard — proposing edits, generating boilerplate, and keeping implementations consistent with the architecture.
-- **OpenCode** acted as an autonomous terminal agent for multi-step engineering: scaffolding new modules and scripts, wiring data ingestion and synthetic-data generation, running and debugging training/inference commands, executing the test suite (`pytest -q`), and drafting documentation including this README.
-
-Human effort went into system design and goals rather than line-by-line authorship: defining the label-efficient self-supervised approach, the trade-offs documented above, and the reproducibility requirements — then directing both agents, reviewing their outputs, and validating behavior against the documented demo commands before each commit.
+See `LICENSE`.

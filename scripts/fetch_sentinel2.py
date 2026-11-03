@@ -34,17 +34,18 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
-import pystac_client
 import rasterio
 from rasterio.transform import Affine
 from rasterio.warp import reproject, transform
 
-import planetary_computer
+# pystac_client and planetary_computer are imported where used, so the module
+# (and its tests) load without the network-only "fetch" extras.
 
 CATALOG_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 COLLECTION = "sentinel-2-l2a"
@@ -93,9 +94,9 @@ def _search(catalog, bbox, window: str, cloud_max: float) -> list:
     )
 
 
-def _read_band(href: str, dst_crs: int, transform: Affine, height: int, width: int) -> np.ndarray:
-    """Read one signed COG band and reproject it onto the shared grid."""
-    out = np.zeros((height, width), dtype=np.float32)
+def _reproject(href: str, dst_crs: int, transform: Affine, height: int, width: int, resampling) -> np.ndarray:
+    """Reproject one signed COG onto the shared grid. Pixels with no data become NaN."""
+    out = np.full((height, width), np.nan, dtype=np.float32)
     with rasterio.open(href) as src:
         reproject(
             source=rasterio.band(src, 1),
@@ -105,48 +106,55 @@ def _read_band(href: str, dst_crs: int, transform: Affine, height: int, width: i
             src_nodata=src.nodata,
             dst_crs=f"EPSG:{dst_crs}",
             dst_transform=transform,
-            dst_nodata=0,
-            resampling=rasterio.enums.Resampling.bilinear,
+            dst_nodata=np.nan,
+            resampling=resampling,
         )
     return out
 
 
-def _composite(items: Iterable, dst_crs: int, transform: Affine, height: int, width: int, use_scl: bool):
-    """Stack best cloud-free acquisitions for a window into one median composite.
+def _composite(
+    items: Iterable,
+    dst_crs: int,
+    transform: Affine,
+    height: int,
+    width: int,
+    use_scl: bool,
+    sign=None,
+) -> np.ndarray:
+    """Median composite of the given acquisitions for one time window.
 
-    Returns a (4, H, W) float32 stack in Sentinel-2 integer scale (0..10000).
-    Pixels that are clouds/shadow (per SCL) or nodata are excluded from the median.
+    Returns a (4, H, W) float32 array in Sentinel-2 integer scale (0..10000).
+    Cloud, cirrus, shadow and nodata pixels (per SCL) are set to NaN so they
+    are ignored by the median. Without SCL, only nodata is ignored.
+
+    ``sign`` signs asset URLs; it defaults to planetary_computer.sign.
     """
+    if sign is None:
+        import planetary_computer
+
+        sign = planetary_computer.sign
     stack = []
     for item in items:
-        item = planetary_computer.sign(item)
-        bands = np.stack([_read_band(item.assets[b].href, dst_crs, transform, height, width) for b in BANDS])
+        item = sign(item)
+        bands = np.stack([
+            _reproject(item.assets[b].href, dst_crs, transform, height, width, rasterio.enums.Resampling.bilinear)
+            for b in BANDS
+        ])
         if use_scl and "SCL" in item.assets:
-            scl = np.zeros((height, width), dtype=np.uint8)
-            with rasterio.open(item.assets["SCL"].href) as src:
-                reproject(
-                    source=rasterio.band(src, 1),
-                    destination=scl,
-                    src_crs=src.crs,
-                    src_transform=src.transform,
-                    src_nodata=src.nodata,
-                    dst_crs=f"EPSG:{dst_crs}",
-                    dst_transform=transform,
-                    dst_nodata=0,
-                    resampling=rasterio.enums.Resampling.nearest,
-                )
-            bad = np.isin(scl, BAD_SCL)
-            bands[:, bad] = 0
-        else:
-            bands[bands == 0] = np.nan
+            scl = _reproject(item.assets["SCL"].href, dst_crs, transform, height, width, rasterio.enums.Resampling.nearest)
+            # SCL holds small integer classes; NaN (no data) maps to class 0, which is in BAD_SCL.
+            bad = np.isin(np.nan_to_num(scl, nan=0).astype(np.uint8), list(BAD_SCL))
+            bands[:, bad] = np.nan
         stack.append(bands)
     arr = np.stack(stack)  # (n, 4, H, W)
-    with np.errstate(invalid="ignore"):
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)  # all-NaN pixels are expected
         return np.nanmedian(arr, axis=0).astype(np.float32)
 
 
 def _write_tiff(path: Path, arr: np.ndarray, crs: int, transform: Affine) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    arr = np.nan_to_num(arr, nan=0.0)  # nodata is stored as 0 (declared in the profile)
     count, height, width = arr.shape
     profile = {
         "driver": "GTiff",
@@ -182,6 +190,8 @@ def main() -> None:
     dst_crs = _utm_epsg(lon, lat)
     transform, height, width = _target_grid(bbox, dst_crs, gsd=10)
     print(f"AOI bbox (deg): {bbox}  grid: {height}x{width} px at 10 m, EPSG:{dst_crs}")
+
+    import pystac_client
 
     catalog = pystac_client.Client.open(CATALOG_URL)
     scene_dir = Path(a.output) / a.scene
