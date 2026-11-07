@@ -24,10 +24,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+import make_example_images  # noqa: E402
 import make_synthetic  # noqa: E402
+from make_example_images import raw_difference, spectral_difference  # noqa: E402
 
 from sat_change import evaluate, train  # noqa: E402
-from sat_change.io import discover_masks, normalize_reflectance, pair_images, read_image, scene_key  # noqa: E402
+from sat_change.io import discover_masks, pair_images, read_image, scene_key  # noqa: E402
 from sat_change.metrics import rank_auc, segmentation_metrics  # noqa: E402
 from sat_change.model import SatelliteEncoder  # noqa: E402
 from sat_change.postprocess import binary_mask  # noqa: E402
@@ -37,18 +39,13 @@ TRAIN_SCENES = range(0, 8)
 HELDOUT_SCENES = range(8, 12)
 
 
-def spectral_difference(before: Path, after: Path) -> np.ndarray:
-    """Per-pixel Euclidean distance between normalised before and after reflectance."""
-    xb = normalize_reflectance(read_image(before)[0])
-    xa = normalize_reflectance(read_image(after)[0])
-    return np.sqrt(((xb - xa) ** 2).sum(0))
-
-
 def compare_baselines(heldout: Path, checkpoint: Path) -> dict[str, dict[str, float]]:
-    """Held-out metrics for the trained encoder and two baselines, averaged over scenes.
+    """Held-out metrics for the trained encoder and three baselines, averaged over scenes.
 
     The random encoder uses the same architecture with untrained weights, which
-    shows how much of the signal comes from the architecture alone.
+    shows how much of the signal comes from the architecture alone. "Spectral
+    difference" stretches each date by its own percentiles first, as the encoder's
+    input does; "raw difference" skips that stretch.
     """
     masks = {scene_key(p): p for p in discover_masks(heldout)}
     trained = load_model(checkpoint)
@@ -58,6 +55,7 @@ def compare_baselines(heldout: Path, checkpoint: Path) -> dict[str, dict[str, fl
         "trained encoder": lambda b, a: score_pair(trained, b, a, tile_size=96, overlap=16)[0],
         "random encoder": lambda b, a: score_pair(random_encoder, b, a, tile_size=96, overlap=16)[0],
         "spectral difference": spectral_difference,
+        "raw difference": raw_difference,
     }
     per_scene: dict[str, list[dict[str, float]]] = {name: [] for name in scorers}
     for before, after in pair_images(heldout):
@@ -136,6 +134,11 @@ def main() -> None:
     shutil.copy2(outputs / "history.json", docs / "history.json")
     shutil.copy2(outputs / "metrics.json", docs / "metrics.json")
     (docs / "baselines.json").write_text(json.dumps(baselines, indent=2))
+
+    print("rendering example images for the project page")
+    sys.argv = ["make_example_images", "--heldout", str(heldout_dir), "--checkpoint", str(outputs / "best.pt"),
+                "--output", str(docs.parent / "img"), "--data", str(docs)]
+    make_example_images.main()
     print(f"done. wrote results to {docs}")
 
 
