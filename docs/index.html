@@ -5,104 +5,113 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Self-supervised satellite change detection</title>
 <style>
-  :root { --ink: #1f2933; --muted: #5f6b7a; --accent: #0f766e; --line: #d9e2ec; --bg: #f7fafc; }
-  body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); background: var(--bg); margin: 0; line-height: 1.55; }
-  main { max-width: 880px; margin: 0 auto; padding: 32px 20px 64px; }
-  h1 { font-size: 2rem; margin: 0 0 8px; }
-  h2 { margin-top: 40px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
-  .lede { font-size: 1.15rem; color: var(--muted); }
+  :root { --ink: #1f2933; --muted: #5f6b7a; --accent: #0f766e; --warm: #ea7a00; --line: #d9e2ec; --bg: #f7fafc; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); background: var(--bg);
+         margin: 0; line-height: 1.6; }
+  main { max-width: 900px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 2rem; margin: 0 0 8px; line-height: 1.25; }
+  h2 { margin-top: 44px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  .lede { font-size: 1.2rem; color: var(--muted); }
   .links a { margin-right: 16px; color: var(--accent); font-weight: 600; }
-  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin: 16px 0; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin: 16px 0;
+          overflow-x: auto; }
+  .verdict { border-left: 4px solid var(--warm); background: #fff8ef; padding: 4px 18px; margin: 16px 0;
+             border-radius: 0 8px 8px 0; }
   svg { width: 100%; height: auto; }
-  .grid { stroke: var(--line); }
+  .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+  figure { margin: 0; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  figure img { width: 100%; height: auto; display: block; border-radius: 6px; image-rendering: pixelated; }
+  figcaption { font-size: 0.9rem; color: var(--muted); margin-top: 8px; }
+  .box { fill: #fff; stroke: var(--accent); stroke-width: 1.5; }
+  .box.strong { fill: #e6f4f1; stroke-width: 2.5; }
+  .label { fill: var(--ink); font-size: 14px; }
+  .step { fill: var(--accent); font-size: 15px; font-weight: 600; }
+  .arrow { stroke: var(--muted); stroke-width: 2; }
+  .arrowhead { fill: var(--muted); }
+  .gridline { stroke: var(--line); }
   .axis { stroke: var(--muted); }
   .series { fill: none; stroke: var(--accent); stroke-width: 2.5; }
   .bar { fill: var(--accent); opacity: 0.85; }
-  .tick { fill: var(--muted); font-size: 12px; }
+  .guess { stroke: var(--warm); stroke-dasharray: 5 4; stroke-width: 1.5; }
+  .tick { fill: var(--muted); font-size: 12.5px; }
   table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
   th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); }
   th:first-child, td:first-child { text-align: left; }
   code { background: #edf2f7; padding: 2px 6px; border-radius: 4px; }
   pre { background: #1f2933; color: #f7fafc; padding: 14px; border-radius: 8px; overflow-x: auto; }
+  dt { font-weight: 700; margin-top: 12px; }
+  dd { margin: 2px 0 0; color: var(--muted); }
   .note { color: var(--muted); font-size: 0.95rem; }
-  .mermaid { text-align: center; }
 </style>
 </head>
 <body>
 <main>
-<h1>Self-supervised satellite change detection</h1>
-<p class="lede">Detects change between two satellite images of the same place, using a convolutional
-encoder pretrained with contrastive learning on <strong>unlabelled</strong> imagery. No change labels are
-needed for training.</p>
-<p class="note"><strong>Status:</strong> on held-out synthetic scenes, the pretrained model does not yet beat a simple
-per-pixel spectral difference. The comparison is below. This is a research baseline with an honest negative result.</p>
+<h1>Finding what changed between two satellite photos</h1>
+<p class="lede">Give it two photos of the same place taken months apart, and it marks the pixels that
+changed: cleared forest, new buildings, flooding. It learns what satellite images look like from
+<strong>unlabelled</strong> photos, so nobody has to hand-label thousands of examples.</p>
+<p class="note"><strong>Status:</strong> a research project with an honest negative result. On photos it
+had not seen, the trained network does not yet beat a simple colour difference. The sections below show
+what that means and why.</p>
 <p class="links">
   <a href="https://github.com/inshal8717/self-supervised-satellite-change-detection-train">Source code</a>
   <a href="https://github.com/inshal8717/self-supervised-satellite-change-detection-train#quick-start">Quick start</a>
-  <a href="https://github.com/inshal8717/self-supervised-satellite-change-detection-train#limitations">Limitations</a>
+  <a href="#glossary">Glossary</a>
 </p>
 
-<h2>How it works</h2>
-<div class="card mermaid">
-<pre class="mermaid">
-flowchart LR
-    A[Unlabelled Sentinel-2 imagery&lt;br/&gt;B02 B03 B04 B08] --&gt; B[Per-band normalisation]
-    B --&gt; C[Random patch + two augmented views]
-    C --&gt; E[Shared CNN encoder]
-    E --&gt; H[NT-Xent contrastive loss]
-    H --&gt; E
-    B --&gt; I[Before / after scenes]
-    I --&gt; J[Same encoder, dense features at 3 scales]
-    J --&gt; K[Cosine distance, upsampled and averaged]
-    K --&gt; L[Otsu threshold]
-    L --&gt; M[Change mask and score map]
-</pre>
-</div>
-<p>The encoder is a small fully convolutional network. Before and after scenes pass through the same encoder, and the
-distance between their feature maps at three scales gives a dense change score. Otsu thresholding turns that score
-into a mask without any labels.</p>
+<h2>What it does, in one picture</h2>
+<p>Here is one scene the network never saw during training (scene008, a synthetic scene). Orange means &ldquo;changed&rdquo;. The first two images are the question, the third is the answer key, and the rest are attempts to find the answer. The changed area is obvious to the eye, and a good method should find just that patch.</p><div class="panels"><figure><img src="img/example_before.png" alt="Before" width="288" height="288"><figcaption><strong>Before</strong><br>The first photo.</figcaption></figure><figure><img src="img/example_after.png" alt="After" width="288" height="288"><figcaption><strong>After</strong><br>The second photo of the same place.</figcaption></figure><figure><img src="img/example_truth.png" alt="What really changed" width="288" height="288"><figcaption><strong>What really changed</strong><br>5.2% of the scene. This is the answer key.</figcaption></figure><figure><img src="img/example_model.png" alt="Trained network" width="288" height="288"><figcaption><strong>Trained network</strong><br>Marks 73% as changed. Score (F1): 0.10.</figcaption></figure><figure><img src="img/example_baseline.png" alt="Colour difference, stretched" width="288" height="288"><figcaption><strong>Colour difference, stretched</strong><br>Marks 48% as changed. Score (F1): 0.15.</figcaption></figure><figure><img src="img/example_raw.png" alt="Colour difference, raw" width="288" height="288"><figcaption><strong>Colour difference, raw</strong><br>Marks 5.2% as changed. Score (F1): 1.00.</figcaption></figure></div>
 
-<h2>Training</h2>
+<h2>How it works</h2>
+<div class="card"><svg viewBox="0 0 700 274" role="img" aria-label="Step 1 learns from unlabelled photos. Step 2 compares two dates and marks pixels that differ."><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrowhead"/></marker></defs><text x="10" y="20" class="step">Step 1: learn what satellite images look like (no change labels needed)</text><rect x="10" y="38" width="200" height="74" rx="8" class="box"/><text x="110.0" y="71.5" text-anchor="middle" class="label">Lots of satellite</text><text x="110.0" y="88.5" text-anchor="middle" class="label">photos, unlabelled</text><line x1="210" y1="75" x2="250" y2="75" class="arrow" marker-end="url(#head)"/><rect x="250" y="38" width="200" height="74" rx="8" class="box"/><text x="350.0" y="71.5" text-anchor="middle" class="label">Cut out a small patch,</text><text x="350.0" y="88.5" text-anchor="middle" class="label">distort it in two ways</text><line x1="450" y1="75" x2="490" y2="75" class="arrow" marker-end="url(#head)"/><rect x="490" y="38" width="200" height="74" rx="8" class="box strong"/><text x="590.0" y="71.5" text-anchor="middle" class="label">Network learns: both</text><text x="590.0" y="88.5" text-anchor="middle" class="label">versions are the same patch</text><text x="10" y="172" class="step">Step 2: compare the same place on two dates</text><rect x="10" y="190" width="200" height="74" rx="8" class="box"/><text x="110.0" y="223.5" text-anchor="middle" class="label">Photo before</text><text x="110.0" y="240.5" text-anchor="middle" class="label">and photo after</text><line x1="210" y1="227" x2="250" y2="227" class="arrow" marker-end="url(#head)"/><rect x="250" y="190" width="200" height="74" rx="8" class="box strong"/><text x="350.0" y="223.5" text-anchor="middle" class="label">Network describes</text><text x="350.0" y="240.5" text-anchor="middle" class="label">every pixel of both</text><line x1="450" y1="227" x2="490" y2="227" class="arrow" marker-end="url(#head)"/><rect x="490" y="190" width="200" height="74" rx="8" class="box"/><text x="590.0" y="223.5" text-anchor="middle" class="label">Pixels whose description</text><text x="590.0" y="240.5" text-anchor="middle" class="label">differs a lot = changed</text></svg></div>
+<p>First it learns, with no answers given, what ordinary satellite imagery looks like. Then, for a before and after
+photo, it describes each pixel of both with the same network, and marks the pixels whose descriptions differ
+most. A cut-off picks which of those count as changed.</p>
+
+<h2>How well does it work?</h2>
+<p>The network was trained on 8 synthetic scenes and tested on 4 others it had never seen. Every method below was
+tested on the same 4 scenes and uses the same cut-off rule. Higher is better. A score of 0.5 on AUROC means no
+better than guessing. See the glossary for what each column means.</p>
+<div class="card"><table><thead><tr><th>method</th><th>AUROC</th><th>F1</th><th>IoU</th><th>Precision</th><th>Recall</th></tr></thead><tbody><tr><td>Trained network (this project)</td><td>0.491</td><td>0.181</td><td>0.101</td><td>0.103</td><td>0.798</td></tr><tr><td>Same network, untrained</td><td>0.702</td><td>0.529</td><td>0.449</td><td>0.477</td><td>0.673</td></tr><tr><td>Colour difference, each photo stretched on its own</td><td>0.740</td><td>0.240</td><td>0.138</td><td>0.144</td><td>0.757</td></tr><tr><td>Colour difference, raw values</td><td>1.000</td><td>1.000</td><td>1.000</td><td>1.000</td><td>1.000</td></tr></tbody></table></div><div class="card"><svg viewBox="0 0 720 184" role="img" aria-label="Held-out AUROC by method"><line x1="490.0" x2="490.0" y1="0" y2="166" class="guess"/><text x="490.0" y="180" class="tick" text-anchor="middle">0.5 = guessing</text><text x="320" y="26" class="tick" text-anchor="end">Trained network (this project)</text><rect x="330" y="11" width="157.2" height="22" class="bar"/><text x="495.2" y="27" class="tick">0.491</text><text x="320" y="66" class="tick" text-anchor="end">Same network, untrained</text><rect x="330" y="51" width="224.7" height="22" class="bar"/><text x="562.7" y="67" class="tick">0.702</text><text x="320" y="106" class="tick" text-anchor="end">Colour difference, each photo stretched on its own</text><rect x="330" y="91" width="236.9" height="22" class="bar"/><text x="574.9" y="107" class="tick">0.740</text><text x="320" y="146" class="tick" text-anchor="end">Colour difference, raw values</text><rect x="330" y="131" width="320.0" height="22" class="bar"/><text x="658.0" y="147" class="tick">1.000</text></svg></div><div class="verdict"><p><strong>The trained network does not work yet.</strong> It scores 0.49, which is close to guessing (0.50), and a plain colour difference beats it (0.74). <strong>The cause is visible in the last two rows.</strong> Comparing the raw values scores 1.00, almost perfect, but stretching each photo on its own first drops that to 0.74. A big change in one photo shifts how that photo is stretched, so the whole scene looks different. The network is trained on stretched photos too, so it very likely suffers the same way. I have not retrained it with a shared stretch yet. That is the first thing to try.</p></div>
+
+<h2>Training details</h2>
 <div class="card"><svg viewBox="0 0 640 280" role="img" aria-label="Training loss by epoch">
-  <line x1="48" x2="592" y1="232.0" y2="232.0" class="grid"/><text x="42" y="236.0" class="tick" text-anchor="end">0.0</text><line x1="48" x2="592" y1="186.0" y2="186.0" class="grid"/><text x="42" y="190.0" class="tick" text-anchor="end">0.7</text><line x1="48" x2="592" y1="140.0" y2="140.0" class="grid"/><text x="42" y="144.0" class="tick" text-anchor="end">1.4</text><line x1="48" x2="592" y1="94.0" y2="94.0" class="grid"/><text x="42" y="98.0" class="tick" text-anchor="end">2.1</text><line x1="48" x2="592" y1="48.0" y2="48.0" class="grid"/><text x="42" y="52.0" class="tick" text-anchor="end">2.9</text>
+  <line x1="48" x2="592" y1="232.0" y2="232.0" class="gridline"/><text x="42" y="236.0" class="tick" text-anchor="end">0.0</text><line x1="48" x2="592" y1="186.0" y2="186.0" class="gridline"/><text x="42" y="190.0" class="tick" text-anchor="end">0.7</text><line x1="48" x2="592" y1="140.0" y2="140.0" class="gridline"/><text x="42" y="144.0" class="tick" text-anchor="end">1.4</text><line x1="48" x2="592" y1="94.0" y2="94.0" class="gridline"/><text x="42" y="98.0" class="tick" text-anchor="end">2.1</text><line x1="48" x2="592" y1="48.0" y2="48.0" class="gridline"/><text x="42" y="52.0" class="tick" text-anchor="end">2.9</text>
   <line x1="48" x2="48" y1="48" y2="232" class="axis"/>
   <line x1="48" x2="592" y1="232" y2="232" class="axis"/>
   <polyline points="48.0,64.7 66.8,83.8 85.5,101.7 104.3,115.4 123.0,128.7 141.8,138.4 160.6,146.9 179.3,150.0 198.1,155.7 216.8,159.2 235.6,162.2 254.3,165.9 273.1,170.0 291.9,169.1 310.6,171.7 329.4,174.8 348.1,175.1 366.9,177.0 385.7,178.7 404.4,179.8 423.2,180.5 441.9,183.3 460.7,179.8 479.4,183.8 498.2,183.3 517.0,184.5 535.7,185.9 554.5,186.2 573.2,185.8 592.0,184.7" class="series"/>
-  <text x="320.0" y="270" class="tick" text-anchor="middle">epoch</text>
-  <text x="14" y="140.0" class="tick" text-anchor="middle" transform="rotate(-90 14 140.0)">NT-Xent loss</text>
+  <text x="320.0" y="270" class="tick" text-anchor="middle">epoch (one pass of training)</text>
+  <text x="14" y="140.0" class="tick" text-anchor="middle" transform="rotate(-90 14 140.0)">loss (lower is better)</text>
 </svg></div>
-<p class="note">NT-Xent loss over 30 epochs, reproduced by <code>scripts/reproduce_results.py</code>.
-Final epoch loss: 0.733.</p>
+<p class="note">Loss over 30 epochs, reproduced by <code>scripts/reproduce_results.py</code>.
+Final loss: 0.733. The loss falls, so the network is learning its training task, but that task has
+not yet translated into finding change.</p>
+<h3>Results scene by scene (trained network)</h3>
+<div class="card"><table><thead><tr><th>scene</th><th>iou</th><th>f1</th><th>precision</th><th>recall</th><th>auroc</th></tr></thead><tbody><tr><td>scene008</td><td>0.052</td><td>0.098</td><td>0.053</td><td>0.739</td><td>0.435</td></tr><tr><td>scene009</td><td>0.143</td><td>0.250</td><td>0.144</td><td>0.932</td><td>0.671</td></tr><tr><td>scene010</td><td>0.084</td><td>0.155</td><td>0.088</td><td>0.650</td><td>0.310</td></tr><tr><td>scene011</td><td>0.124</td><td>0.221</td><td>0.126</td><td>0.871</td><td>0.549</td></tr></tbody></table></div>
+<p class="note">These are synthetic scenes: the changed patch is a flat, distinct colour with mild noise, so
+they are much easier than real change. They check that the pipeline works. They do not measure real-world
+accuracy.</p>
 
-<h2>Held-out results</h2>
-<p>The encoder was pretrained on scenes 0 to 7 and evaluated on scenes 8 to 11, which it never saw. Ground-truth masks
-were used only for scoring. Two baselines use the same scenes and the same thresholding: a plain per-pixel spectral
-difference, and the same network with random, untrained weights.</p>
-<div class="card"><table><thead><tr><th>method</th><th>AUROC</th><th>F1</th><th>IoU</th><th>Precision</th><th>Recall</th></tr></thead><tbody><tr><td>trained encoder</td><td>0.491</td><td>0.181</td><td>0.101</td><td>0.103</td><td>0.798</td></tr><tr><td>random encoder</td><td>0.702</td><td>0.529</td><td>0.449</td><td>0.477</td><td>0.673</td></tr><tr><td>spectral difference</td><td>0.740</td><td>0.240</td><td>0.138</td><td>0.144</td><td>0.757</td></tr></tbody></table></div><div class="card"><svg viewBox="0 0 640 118" role="img" aria-label="Held-out AUROC by method"><text x="160" y="25" class="tick" text-anchor="end">trained encoder</text><rect x="170" y="11" width="196.5" height="20" class="bar"/><text x="374.5" y="26" class="tick">0.491</text><text x="160" y="61" class="tick" text-anchor="end">random encoder</text><rect x="170" y="47" width="280.9" height="20" class="bar"/><text x="458.9" y="62" class="tick">0.702</text><text x="160" y="97" class="tick" text-anchor="end">spectral difference</text><rect x="170" y="83" width="296.2" height="20" class="bar"/><text x="474.2" y="98" class="tick">0.740</text></svg></div><div class="verdict"><p><strong>On this held-out set, the trained encoder does not beat a plain spectral difference.</strong> Its AUROC is 0.49, near the 0.50 expected from chance, against 0.74 for the spectral difference. The random-weight encoder also scores higher than the trained one on F1 and IoU. Pretraining on this data, with this budget, is not yet adding value.</p></div>
-<div class="card"><table><thead><tr><th>scene</th><th>iou</th><th>f1</th><th>precision</th><th>recall</th><th>auroc</th><th>threshold</th></tr></thead><tbody><tr><td>scene008</td><td>0.052</td><td>0.098</td><td>0.053</td><td>0.739</td><td>0.435</td><td>0.834</td></tr><tr><td>scene009</td><td>0.143</td><td>0.250</td><td>0.144</td><td>0.932</td><td>0.671</td><td>0.836</td></tr><tr><td>scene010</td><td>0.084</td><td>0.155</td><td>0.088</td><td>0.650</td><td>0.310</td><td>0.926</td></tr><tr><td>scene011</td><td>0.124</td><td>0.221</td><td>0.126</td><td>0.871</td><td>0.549</td><td>0.813</td></tr></tbody></table></div>
-<p class="note">These are synthetic scenes: a changed region is a flat, distinct spectral signature with mild noise, so
-they are much easier than real change. The threshold is chosen per scene by Otsu, which keeps it label-free.</p>
-
-<h2>Reproduce</h2>
+<h2>Reproduce it</h2>
 <pre>pip install -e ".[geo,dashboard]"
-python scripts/reproduce_results.py   # about a few minutes on CPU
+python scripts/reproduce_results.py   # trains and tests, a few minutes on a CPU
 python scripts/build_site.py          # rebuilds this page</pre>
-<p>Run the interactive dashboard locally with <code>streamlit run app.py</code>. It is not hosted, because this project
+<p>The interactive dashboard runs locally with <code>streamlit run app.py</code>. It is not hosted, because this
 page is static.</p>
 
 <h2>Limitations</h2>
 <ul>
-  <li>Research baseline. It is not a disaster-monitoring product.</li>
-  <li>Outputs a binary change mask. It does not say what kind of change happened.</li>
-  <li>Assumes the two images are already aligned at the pixel level.</li>
-  <li>Real-world accuracy has not been measured. Public benchmarks with trusted masks are the next step.</li>
+  <li>A research baseline, not a monitoring product.</li>
+  <li>It outputs a yes/no change map. It does not say what kind of change happened.</li>
+  <li>It assumes the two photos are already lined up pixel for pixel.</li>
+  <li>It has not been tested on real labelled change data. That is the necessary next step.</li>
 </ul>
-<p class="note">Source: <a href="https://github.com/inshal8717/self-supervised-satellite-change-detection-train">github.com/inshal8717/self-supervised-satellite-change-detection-train</a> ·
+
+<h2 id="glossary">Glossary</h2>
+<dl><dt>Change detection</dt><dd>Finding what is different between two photos of the same place taken at different times.</dd><dt>Self-supervised learning</dt><dd>Training a network without anyone labelling the answers. Here it learns from unlabelled photos by recognising that two distorted copies of the same patch are still the same patch.</dd><dt>Encoder</dt><dd>The neural network. It turns each small area of a photo into a list of numbers that describes it.</dd><dt>Held-out</dt><dd>Photos the network never saw while training. Testing on them shows whether it learned something general, instead of memorising.</dd><dt>Baseline</dt><dd>A simple method to compare against. If a fancy method can&#x27;t beat a simple one, it isn&#x27;t helping yet.</dd><dt>AUROC</dt><dd>A score from 0 to 1 for how well a method ranks truly changed pixels above unchanged ones. 0.5 is the same as guessing, 1.0 is perfect.</dd><dt>F1</dt><dd>A score from 0 to 1 for the final changed/unchanged map. It penalises both missed changes and false alarms.</dd><dt>Otsu threshold</dt><dd>An automatic way to pick the cut-off that turns a change score into a yes/no map, without labels.</dd><dt>Synthetic scenes</dt><dd>Computer-generated photos with a known changed patch. They are easy and are only a check that the code works, not a measure of real-world accuracy.</dd><dt>Sentinel-2</dt><dd>The European satellites whose 10-metre images this project is designed to use.</dd></dl>
+<p class="note">Source: <a href="https://github.com/inshal8717/self-supervised-satellite-change-detection-train">github.com/inshal8717/self-supervised-satellite-change-detection-train</a> &middot;
 Page generated by <code>scripts/build_site.py</code>.</p>
 </main>
-<script type="module">
-  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
-  mermaid.initialize({ startOnLoad: true, theme: "neutral" });
-</script>
 </body>
 </html>

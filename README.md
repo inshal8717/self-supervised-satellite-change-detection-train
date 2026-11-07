@@ -2,30 +2,52 @@
 
 [![CI](https://github.com/inshal8717/self-supervised-satellite-change-detection-train/actions/workflows/ci.yml/badge.svg)](https://github.com/inshal8717/self-supervised-satellite-change-detection-train/actions/workflows/ci.yml)
 
-A PyTorch pipeline that pretrains a convolutional encoder on **unlabelled** Sentinel-2 imagery with SimCLR-style
-contrastive learning, then flags change by comparing dense feature maps from before and after images. Training needs
-no change labels. Ground-truth masks are used only for evaluation.
+**In plain words:** give it two satellite photos of the same place, taken months apart, and it marks the pixels that
+changed, such as cleared forest, new buildings or flooding. Most systems like this need people to hand-label
+thousands of "this changed" examples. This one first learns what satellite images look like from **unlabelled**
+photos, then compares what its neural network "sees" in the two photos.
 
-**Project page:** https://inshal8717.github.io/self-supervised-satellite-change-detection-train/
+**Project page (pictures, results, glossary):** https://inshal8717.github.io/self-supervised-satellite-change-detection-train/
 
-> **Status: research baseline with a negative result.** On held-out synthetic scenes, the pretrained encoder does not
-> yet beat a plain per-pixel spectral difference (table below). Earlier figures in this repository (AUROC 0.98) were
-> measured on the same scenes the model was trained on, and are withdrawn.
+> **Status: a research project with an honest negative result.** On photos the network never saw, the trained network
+> does not yet beat a simple colour difference. The cause is visible in the table below. Earlier figures in this
+> repository (AUROC 0.98) were measured on the training scenes and are withdrawn.
+
+## What it looks like
+
+One held-out synthetic scene. Orange means "changed". The first two are the question, the third is the answer key,
+and the rest are attempts at the answer.
+
+| Before | After | What really changed | Trained network | Colour difference, raw |
+| :---: | :---: | :---: | :---: | :---: |
+| <img src="docs/img/example_before.png" width="150"> | <img src="docs/img/example_after.png" width="150"> | <img src="docs/img/example_truth.png" width="150"> | <img src="docs/img/example_model.png" width="150"> | <img src="docs/img/example_raw.png" width="150"> |
+
+The trained network marks most of the scene as changed. A plain colour difference on the raw values finds just the
+changed patch.
 
 ## Results on held-out synthetic scenes
 
-The encoder was pretrained on scenes 0–7 and scored on scenes 8–11, which it never saw. All three methods use the same
-scenes and the same per-scene Otsu threshold. Reproduce with `python scripts/reproduce_results.py`.
+The network was pretrained on scenes 0–7 and scored on scenes 8–11, which it never saw. Every method uses the same
+scenes and the same per-scene Otsu cut-off. Reproduce with `python scripts/reproduce_results.py`.
 
 | Method | AUROC | F1 | IoU | Precision | Recall |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Trained encoder | 0.491 | 0.181 | 0.101 | 0.103 | 0.798 |
-| Random-weight encoder (same architecture) | 0.702 | 0.529 | 0.449 | 0.477 | 0.673 |
-| Spectral difference (per-pixel L2) | **0.740** | 0.240 | 0.138 | 0.144 | 0.757 |
+| Trained network | 0.491 | 0.181 | 0.101 | 0.103 | 0.798 |
+| Same network, untrained (random weights) | 0.702 | 0.529 | 0.449 | 0.477 | 0.673 |
+| Colour difference, each photo stretched on its own | 0.740 | 0.240 | 0.138 | 0.144 | 0.757 |
+| Colour difference, raw values | **1.000** | **1.000** | **1.000** | **1.000** | **1.000** |
 
-An AUROC near 0.5 is chance. The scenes are synthetic, with flat, distinct changed regions and mild noise, so real
-performance will be lower. These numbers check that the pipeline runs and measure how the methods compare. They do not
-measure real-world accuracy. The page at the link above shows the training curve and per-scene results.
+How to read it: AUROC is a score from 0 to 1, where 0.5 is the same as guessing and 1.0 is perfect. F1 and IoU score
+the final changed/unchanged map the same way. The page above has a glossary.
+
+**Why the last two rows matter.** Before comparing, the code stretches each photo's brightness using that photo's own
+percentiles (`normalize_reflectance`). A large change in one photo shifts its stretch, so the whole scene looks
+different from the other photo. Without that stretch, a plain difference separates the change perfectly. The network
+is trained on stretched photos as well, so it very likely suffers the same way. I have not retrained it with one
+shared stretch for both dates, and that is the first thing to try.
+
+The scenes are synthetic, with flat, distinct changed patches and mild noise, so even the perfect score does not
+predict real-world accuracy. These numbers check that the pipeline runs and show how the methods compare.
 
 ## Architecture
 
@@ -154,7 +176,8 @@ rare.
 - **Tiled inference with overlap:** the network runs tile by tile, which bounds memory per forward pass. Both input
   scenes are still loaded in full, and overlap adds runtime.
 - **Per-image normalisation:** each date is normalised by its own percentiles. That is simple, but a change in scene
-  composition can shift both images' scales, so it can create false change.
+  composition shifts that date's scale, so it creates false change. On the held-out scenes this cut a plain
+  difference's AUROC from 1.00 to 0.74 (see Results), so it is the leading suspect for the trained network's failure.
 - **AdamW with cosine decay:** a stable default for contrastive training. It is not tuned for any particular biome.
 
 ## Limitations
@@ -172,10 +195,12 @@ This is a research baseline, not an operational product.
 
 Next steps, in order of value:
 
-1. Test on real labelled change data (for example, public building or deforestation masks).
-2. Compare against more baselines: NDVI/NDBI/NDWI differences, and a small supervised U-Net trained on the same scenes.
-3. Tune the pretraining budget and the number of scenes, and check whether the random-encoder result depends on the architecture.
-4. Calibrate the threshold on a validation region, and report precision-recall curves.
+1. Normalise the before and after photos with one shared stretch, then retrain and re-score. This directly tests the
+   leading explanation for the negative result.
+2. Test on real labelled change data (for example, public building or deforestation masks).
+3. Compare against more baselines: NDVI/NDBI/NDWI differences, and a small supervised U-Net trained on the same scenes.
+4. Tune the pretraining budget and the number of scenes, and check whether the random-encoder result depends on the architecture.
+5. Calibrate the threshold on a validation region, and report precision-recall curves.
 
 ## Tests and lint
 
@@ -185,8 +210,9 @@ ruff check .
 python -m pytest -q
 ```
 
-CI runs both on every push and pull request, on Python 3.10 and 3.12 (`.github/workflows/ci.yml`). The suite has 24
-tests, including an end-to-end run on tiny synthetic data that finishes in a few seconds on a CPU.
+CI runs both on every push and pull request, on Python 3.10 and 3.12 (`.github/workflows/ci.yml`). The suite has 31
+tests, including an end-to-end run on tiny synthetic data that finishes in a few seconds on a CPU, and checks that
+the project page builds, loads no scripts, and matches the committed results.
 
 ## Dashboard
 
@@ -199,7 +225,7 @@ get a map of changed pixels and GeoTIFF downloads. The dashboard runs locally on
 
 ```text
 src/sat_change/     library: io, data, model, train, runtime, metrics, predict, evaluate
-scripts/            synthetic data, demo, Sentinel-2 fetch, held-out reproduction, project page builder
+scripts/            synthetic data, demo, Sentinel-2 fetch, held-out reproduction, example images, project page builder
 app.py              Streamlit dashboard
 docs/               static project page (GitHub Pages)
 tests/              unit tests and an end-to-end smoke test

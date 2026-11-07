@@ -2,6 +2,17 @@
 
 Talking points for this project. Every claim here points to something in the repository, so you can show it live.
 
+## The 30-second version (say this out loud)
+
+"Satellites photograph the same place again and again. I wanted a system that spots what changed between two
+photos, like a forest being cleared, without needing thousands of hand-labelled examples. So I trained a neural
+network on unlabelled photos to learn what imagery looks like, then compared how it describes the before and after
+photos. I tested it on photos it had never seen and compared it to simple baselines. It didn't beat them, and I
+tracked down why: stretching each photo's brightness separately hides the very change I'm looking for. A plain
+difference gets a perfect score without that stretch, and falls to 0.74 with it."
+
+If they ask for more, use the sections below.
+
 ## One-minute pitch
 
 I built a pipeline that pretrains a small CNN on unlabelled Sentinel-2 imagery using contrastive learning (SimCLR-style),
@@ -13,7 +24,7 @@ honest.
 ## What I'd show
 
 1. `python scripts/demo.py --synthetic`: the full pipeline in about a minute.
-2. `docs/index.html` or the project page: the training curve, and the held-out table with both baselines.
+2. The project page: the before/after picture first, then the held-out table with the baselines.
 3. `scripts/reproduce_results.py`: the held-out split, and the baselines computed on the same scenes.
 4. `streamlit run app.py`: upload a pair and show the heatmap and mask.
 5. CI: a green run, and `tests/test_pipeline.py` as the end-to-end test.
@@ -41,7 +52,8 @@ On 4 held-out synthetic scenes (pretrained on 8 others):
 | --- | ---: | ---: |
 | Trained encoder | 0.491 | 0.181 |
 | Random-weight encoder | 0.702 | 0.529 |
-| Spectral difference | 0.740 | 0.240 |
+| Colour difference, each photo stretched on its own | 0.740 | 0.240 |
+| Colour difference, raw values (no stretch) | 1.000 | 1.000 |
 
 Things to say:
 
@@ -50,9 +62,16 @@ Things to say:
 - Adding baselines made the result legible. Without the random-encoder baseline I could not tell whether the learned
   features helped at all. The random encoder scoring above the trained one suggests the trained features are not
   adding value, and that the architecture's inductive bias is doing some of the work.
-- My likely explanations, in the order I would test them: the pretraining budget is too small (8 scenes, 30 epochs),
-  the contrastive objective is learning features that are invariant to exactly the spectral differences I need, and
-  per-image normalisation is hiding or inventing change. Each is a testable hypothesis.
+- The leading explanation now has evidence. Per-image normalisation stretches each photo by its own percentiles.
+  A large change in one photo shifts its stretch, so the whole scene looks different. I tested this on the plain
+  colour difference: skipping the stretch took AUROC from 0.74 to 1.00 on every held-out scene. The encoder is
+  trained and run on stretched photos too, so it very likely has the same problem. I did **not** retrain it with a
+  shared stretch, so say "very likely", not "proven".
+- The other hypotheses, in the order I would test them after that: the pretraining budget is too small (8 scenes,
+  30 epochs), and the contrastive objective learns features that are invariant to exactly the spectral differences
+  I need.
+- One caution: the raw difference scoring 1.000 shows the synthetic task is trivial, not that the method is good.
+  Real change is not a flat colour patch on a smooth background.
 
 ## Bugs I found and fixed
 
@@ -89,8 +108,9 @@ transformer would be a reasonable next experiment at larger scale.
 runs training, prediction and evaluation on tiny data. CI runs lint and tests on Python 3.10 and 3.12. The synthetic
 demo's synthetic metrics matched to full precision before and after my refactor, using a fixed seed.
 
-**What would you do with another week?** Test on real labelled data, add the NDVI and supervised baselines, and run a
-proper pretraining sweep over the number of scenes and epochs.
+**What would you do with another week?** First, retrain with one shared brightness stretch for both dates, since that
+is the leading explanation for the failure. Then test on real labelled data, add the NDVI and supervised baselines,
+and run a proper pretraining sweep over the number of scenes and epochs.
 
 ## Things I would not claim
 

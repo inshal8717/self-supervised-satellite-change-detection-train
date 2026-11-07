@@ -1,0 +1,10 @@
+{
+  "scene": "scene008",
+  "truth_changed_pct": 5.197482638888888,
+  "model_changed_pct": 73.06857638888889,
+  "baseline_changed_pct": 47.98177083333333,
+  "raw_changed_pct": 5.197482638888888,
+  "model_f1": 0.09815610702897547,
+  "baseline_f1": 0.15466231381350742,
+  "raw_f1": 1.0
+}
