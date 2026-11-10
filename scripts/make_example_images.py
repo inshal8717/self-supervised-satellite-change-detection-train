@@ -4,8 +4,8 @@ Writes six PNGs and a small JSON file with the numbers shown in their captions:
 
     before, after      the two photos (red, green, blue bands)
     truth              where the scene really changed
-    model              what the trained encoder flags as changed
-    baseline           colour difference after stretching each photo on its own
+    model              what the trained encoder flags as changed (shared stretch, the current method)
+    model_old          the same network with each photo stretched on its own (the old, flawed scaling)
     raw                colour difference on the raw values, with no stretching
 
 Usage (after scripts/reproduce_results.py has trained a checkpoint):
@@ -26,7 +26,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from sat_change.io import normalize_reflectance, pair_images, read_image, scene_key  # noqa: E402
+from sat_change.io import normalize_pair, normalize_reflectance, pair_images, read_image, scene_key  # noqa: E402
 from sat_change.metrics import segmentation_metrics  # noqa: E402
 from sat_change.postprocess import binary_mask  # noqa: E402
 from sat_change.runtime import load_model, score_pair  # noqa: E402
@@ -36,10 +36,16 @@ CHANGED = (255, 140, 0)  # orange
 UNCHANGED = (38, 44, 53)  # dark slate
 
 
-def spectral_difference(before: Path, after: Path) -> np.ndarray:
-    """Per-pixel Euclidean distance between normalised before and after reflectance."""
+def per_photo_difference(before: Path, after: Path) -> np.ndarray:
+    """Colour distance after stretching each photo on its own (the flawed scaling)."""
     xb = normalize_reflectance(read_image(before)[0])
     xa = normalize_reflectance(read_image(after)[0])
+    return np.sqrt(((xb - xa) ** 2).sum(0))
+
+
+def shared_difference(before: Path, after: Path) -> np.ndarray:
+    """Colour distance after stretching both photos with one shared stretch."""
+    xb, xa = normalize_pair(read_image(before)[0], read_image(after)[0])
     return np.sqrt(((xb - xa) ** 2).sum(0))
 
 
@@ -98,7 +104,8 @@ def main() -> None:
     model = load_model(args.checkpoint)
     model_score, _ = score_pair(model, before_path, after_path, tile_size=96, overlap=16)
     model_mask, _ = binary_mask(model_score)
-    base_mask, _ = binary_mask(spectral_difference(before_path, after_path))
+    old_score, _ = score_pair(model, before_path, after_path, tile_size=96, overlap=16, stretch="per_photo")
+    old_mask, _ = binary_mask(old_score)
     raw_mask, _ = binary_mask(raw_difference(before_path, after_path))
 
     before, _ = read_image(before_path)
@@ -112,7 +119,7 @@ def main() -> None:
         "after": photo(after, lo, hi),
         "truth": mask_image(truth),
         "model": mask_image(model_mask),
-        "baseline": mask_image(base_mask),
+        "model_old": mask_image(old_mask),
         "raw": mask_image(raw_mask),
     }
     for name, rgb in panels.items():
@@ -122,10 +129,10 @@ def main() -> None:
         "scene": key,
         "truth_changed_pct": float(truth.mean() * 100),
         "model_changed_pct": float(model_mask.mean() * 100),
-        "baseline_changed_pct": float(base_mask.mean() * 100),
+        "model_old_changed_pct": float(old_mask.mean() * 100),
         "raw_changed_pct": float(raw_mask.mean() * 100),
         "model_f1": segmentation_metrics(model_mask, truth)["f1"],
-        "baseline_f1": segmentation_metrics(base_mask, truth)["f1"],
+        "model_old_f1": segmentation_metrics(old_mask, truth)["f1"],
         "raw_f1": segmentation_metrics(raw_mask, truth)["f1"],
     }
     data = Path(args.data)

@@ -26,7 +26,7 @@ import torch  # noqa: E402
 
 import make_example_images  # noqa: E402
 import make_synthetic  # noqa: E402
-from make_example_images import raw_difference, spectral_difference  # noqa: E402
+from make_example_images import per_photo_difference, raw_difference, shared_difference  # noqa: E402
 
 from sat_change import evaluate, train  # noqa: E402
 from sat_change.io import discover_masks, pair_images, read_image, scene_key  # noqa: E402
@@ -40,22 +40,28 @@ HELDOUT_SCENES = range(8, 12)
 
 
 def compare_baselines(heldout: Path, checkpoint: Path) -> dict[str, dict[str, float]]:
-    """Held-out metrics for the trained encoder and three baselines, averaged over scenes.
+    """Held-out metrics for the trained encoder and baselines, averaged over scenes.
 
-    The random encoder uses the same architecture with untrained weights, which
-    shows how much of the signal comes from the architecture alone. "Spectral
-    difference" stretches each date by its own percentiles first, as the encoder's
-    input does; "raw difference" skips that stretch.
+    "trained" is the current method: one brightness stretch shared by both dates.
+    "trained_per_photo" is the same weights scored with each date stretched on its
+    own, which was the original flaw. "untrained" is the same architecture with
+    random weights. The three "diff" rows are plain colour differences with a
+    shared stretch, a per-photo stretch, and no stretch at all.
     """
     masks = {scene_key(p): p for p in discover_masks(heldout)}
     trained = load_model(checkpoint)
     torch.manual_seed(0)
     random_encoder = SatelliteEncoder(4, 32, 128).eval()
+    def network(model, stretch):
+        return lambda b, a: score_pair(model, b, a, tile_size=96, overlap=16, stretch=stretch)[0]
+
     scorers = {
-        "trained encoder": lambda b, a: score_pair(trained, b, a, tile_size=96, overlap=16)[0],
-        "random encoder": lambda b, a: score_pair(random_encoder, b, a, tile_size=96, overlap=16)[0],
-        "spectral difference": spectral_difference,
-        "raw difference": raw_difference,
+        "trained": network(trained, "shared"),
+        "trained_per_photo": network(trained, "per_photo"),
+        "untrained": network(random_encoder, "shared"),
+        "diff_shared": shared_difference,
+        "diff_per_photo": per_photo_difference,
+        "diff_raw": raw_difference,
     }
     per_scene: dict[str, list[dict[str, float]]] = {name: [] for name in scorers}
     for before, after in pair_images(heldout):

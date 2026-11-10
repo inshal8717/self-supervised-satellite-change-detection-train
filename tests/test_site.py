@@ -25,14 +25,16 @@ def _metrics(auroc: float) -> dict:
 
 
 BASELINES = {
-    "trained encoder": _metrics(0.49),
-    "random encoder": _metrics(0.70),
-    "spectral difference": _metrics(0.74),
-    "raw difference": _metrics(1.0),
+    "trained": _metrics(0.999),
+    "trained_per_photo": _metrics(0.49),
+    "untrained": _metrics(0.70),
+    "diff_shared": _metrics(1.0),
+    "diff_per_photo": _metrics(0.74),
+    "diff_raw": _metrics(1.0),
 }
 EXAMPLE = {
-    "scene": "scene008", "truth_changed_pct": 5.2, "model_changed_pct": 73.0, "baseline_changed_pct": 48.0,
-    "raw_changed_pct": 5.3, "model_f1": 0.1, "baseline_f1": 0.15, "raw_f1": 0.99,
+    "scene": "scene008", "truth_changed_pct": 5.2, "model_changed_pct": 5.3, "model_old_changed_pct": 73.0,
+    "raw_changed_pct": 5.3, "model_f1": 0.99, "model_old_f1": 0.1, "raw_f1": 0.99,
 }
 
 
@@ -54,20 +56,51 @@ def test_every_svg_is_well_formed():
         ET.fromstring(svg)
 
 
-def test_verdict_is_written_from_the_numbers():
+def test_verdict_when_the_fix_works_but_a_plain_difference_ties():
     page = _page()
+    assert "One change fixed the network" in page
+    assert "does not beat a plain colour difference" in page
+    assert "0.490" in page and "1.000" in page
+    assert "pretraining is not shown to help" not in page  # untrained network is far behind here
+
+
+def test_verdict_does_not_claim_a_tie_when_the_network_is_clearly_behind():
+    behind = dict(BASELINES, trained=_metrics(0.90))
+    page = build_site.build(HISTORY, {"scenes": SCENES}, behind, EXAMPLE)
+    assert "One change fixed the network" in page
+    assert "does not beat a plain colour difference" not in page
+    assert "best plain colour difference scores 1.000" in page
+
+
+def test_verdict_flags_that_an_untrained_network_does_as_well():
+    page = build_site.build(HISTORY, {"scenes": SCENES}, dict(BASELINES, untrained=_metrics(0.998)), EXAMPLE)
+    assert "pretraining is not shown to help" in page
+    assert "random, untrained weights scores 0.998" in page
+
+
+def test_verdict_flags_a_weak_final_map_when_the_ranking_is_good():
+    weak = dict(BASELINES, trained=dict(_metrics(0.999), f1=0.74), diff_shared=dict(_metrics(1.0), f1=0.999))
+    page = build_site.build(HISTORY, {"scenes": SCENES}, weak, EXAMPLE)
+    assert "marks too many pixels as changed" in page
+    assert "marks too many pixels as changed" not in _page()  # F1s are equal in the default fixture
+
+
+def test_verdict_when_the_network_does_not_work():
+    broken = dict(BASELINES, trained=_metrics(0.45))
+    page = build_site.build(HISTORY, {"scenes": SCENES}, broken, EXAMPLE)
     assert "does not work yet" in page
-    assert "1.00" in page  # raw difference score appears in the explanation
-
-    better = dict(BASELINES, **{"trained encoder": _metrics(0.95)})
-    page = build_site.build(HISTORY, {"scenes": SCENES}, better, EXAMPLE)
-    assert "does not work yet" not in page
+    assert "One change fixed the network" not in page
 
 
-def test_page_builds_without_example_or_raw_baseline():
-    older = {k: v for k, v in BASELINES.items() if k != "raw difference"}
+def test_status_line_follows_the_numbers():
+    assert "not yet shown to beat a plain colour difference" in build_site.status_line(BASELINES)
+    assert "not yet shown" not in build_site.status_line(dict(BASELINES, trained_per_photo=_metrics(0.95)))
+
+
+def test_page_builds_without_example_or_optional_rows():
+    older = {k: v for k, v in BASELINES.items() if k not in ("diff_raw", "trained_per_photo")}
     page = build_site.build(HISTORY, {"scenes": SCENES}, older, None)
-    assert "<h1>" in page and "cause is visible" not in page
+    assert "<h1>" in page and "One change fixed the network" not in page
 
 
 def test_committed_page_matches_committed_data():
