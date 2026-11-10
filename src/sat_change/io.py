@@ -67,6 +67,35 @@ def normalize_reflectance(arr: np.ndarray) -> np.ndarray:
     return np.nan_to_num(x)
 
 
+def normalize_pair(before: np.ndarray, after: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Scale a before/after pair with ONE shared per-band stretch.
+
+    Each band's 2nd-98th percentiles are taken over both dates together, so a
+    pixel that did not change keeps the same value in both outputs. Stretching
+    each date on its own instead shifts the scale whenever one date contains a
+    large change, which makes the whole scene look different.
+
+    Sentinel-2 integer reflectance (0..10000) is detected jointly and rescaled
+    first. NaN (nodata) pixels become 0.
+    """
+    b = before.astype(np.float32, copy=True)
+    a = after.astype(np.float32, copy=True)
+    if np.isfinite(b).any() and np.isfinite(a).any() and max(np.nanpercentile(b, 99), np.nanpercentile(a, 99)) > 2:
+        b /= 10000.0
+        a /= 10000.0
+    for band in range(b.shape[0]):
+        pooled = np.concatenate([b[band][np.isfinite(b[band])], a[band][np.isfinite(a[band])]])
+        if pooled.size == 0:
+            b[band] = 0
+            a[band] = 0
+            continue
+        lo, hi = np.percentile(pooled, [2, 98])
+        scale = max(float(hi - lo), 1e-6)
+        b[band] = np.clip((b[band] - lo) / scale, 0, 1)
+        a[band] = np.clip((a[band] - lo) / scale, 0, 1)
+    return np.nan_to_num(b), np.nan_to_num(a)
+
+
 def scene_key(path: str | Path) -> str:
     """Scene name with a trailing YYYY-MM-DD / YYYYMMDD date removed."""
     return re.sub(r"[-_]?\d{4}[-]?\d{2}[-]?\d{2}$", "", Path(path).stem)

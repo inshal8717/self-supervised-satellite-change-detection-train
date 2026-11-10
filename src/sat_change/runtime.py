@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .io import normalize_reflectance, read_image
+from .io import normalize_pair, normalize_reflectance, read_image
 from .model import SatelliteEncoder, feature_change
 
 
@@ -45,21 +45,33 @@ def score_pair(
     device: str = "cpu",
     tile_size: int = 512,
     overlap: int = 32,
+    stretch: str = "shared",
 ) -> tuple[np.ndarray, dict]:
     """Dense change score (H x W) for a registered before/after pair.
 
     Both scenes are read and normalized in full; only the network forward pass
     runs tile by tile, with overlapping tiles averaged together.
+
+    ``stretch`` chooses how brightness is scaled before the network sees the
+    photos. "shared" (default) uses one stretch for both dates. "per_photo"
+    stretches each date on its own, which makes a large change in one date shift
+    the scale of the whole scene; it is kept only to reproduce the old results.
     """
     if tile_size < 16 or tile_size <= overlap:
         raise ValueError("tile_size must be at least 16 and greater than overlap")
+    if stretch not in ("shared", "per_photo"):
+        raise ValueError(f"stretch must be 'shared' or 'per_photo', not {stretch!r}")
     before, profile = read_image(before_path)
     after, _ = read_image(after_path)
     if before.shape != after.shape:
         raise ValueError(f"Before/after shapes differ: {before.shape} vs {after.shape}; coregister first")
     bands = model.stem[0].in_channels
-    a = torch.from_numpy(normalize_reflectance(before[:bands]))
-    b = torch.from_numpy(normalize_reflectance(after[:bands]))
+    if stretch == "shared":
+        norm_before, norm_after = normalize_pair(before[:bands], after[:bands])
+    else:
+        norm_before, norm_after = normalize_reflectance(before[:bands]), normalize_reflectance(after[:bands])
+    a = torch.from_numpy(norm_before)
+    b = torch.from_numpy(norm_after)
     h, w = a.shape[-2:]
     step = tile_size - overlap
     total = np.zeros((h, w), np.float32)

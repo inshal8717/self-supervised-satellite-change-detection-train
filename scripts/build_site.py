@@ -22,10 +22,12 @@ PAGES_URL = "https://inshal8717.github.io/self-supervised-satellite-change-detec
 
 # (key in baselines.json, plain-English name shown on the page)
 METHODS = [
-    ("trained encoder", "Trained network (this project)"),
-    ("random encoder", "Same network, untrained"),
-    ("spectral difference", "Colour difference, each photo stretched on its own"),
-    ("raw difference", "Colour difference, raw values"),
+    ("trained", "Trained network (shared stretch, current)"),
+    ("trained_per_photo", "Same trained network, old per-photo stretch"),
+    ("untrained", "Same network, untrained (shared stretch)"),
+    ("diff_shared", "Colour difference, shared stretch"),
+    ("diff_per_photo", "Colour difference, per-photo stretch"),
+    ("diff_raw", "Colour difference, raw values"),
 ]
 
 
@@ -141,10 +143,10 @@ def example_section(example: dict | None) -> str:
         ("after", "After", "The second photo of the same place."),
         ("truth", "What really changed",
          f"{example['truth_changed_pct']:.1f}% of the scene. This is the answer key."),
-        ("model", "Trained network",
-         f"Marks {example['model_changed_pct']:.0f}% as changed. Score (F1): {example['model_f1']:.2f}."),
-        ("baseline", "Colour difference, stretched",
-         f"Marks {example['baseline_changed_pct']:.0f}% as changed. Score (F1): {example['baseline_f1']:.2f}."),
+        ("model", "Trained network (current)",
+         f"Marks {example['model_changed_pct']:.1f}% as changed. Score (F1): {example['model_f1']:.2f}."),
+        ("model_old", "Same network, old scaling",
+         f"Marks {example['model_old_changed_pct']:.0f}% as changed. Score (F1): {example['model_old_f1']:.2f}."),
         ("raw", "Colour difference, raw",
          f"Marks {example['raw_changed_pct']:.1f}% as changed. Score (F1): {example['raw_f1']:.2f}."),
     ]
@@ -174,26 +176,68 @@ def comparison_section(baselines: dict[str, dict[str, float]]) -> str:
     table = f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
     bars = bar_chart([(name, baselines[k]["auroc"]) for k, name in methods], "Held-out AUROC by method")
 
-    trained = baselines["trained encoder"]["auroc"]
-    spectral = baselines.get("spectral difference", {}).get("auroc")
-    raw = baselines.get("raw difference", {}).get("auroc")
-    if spectral is not None and trained < spectral:
-        verdict = (
-            f"<strong>The trained network does not work yet.</strong> It scores {trained:.2f}, which is close to "
-            f"guessing (0.50), and a plain colour difference beats it ({spectral:.2f})."
-        )
-    else:
-        verdict = f"The trained network scores {trained:.2f}."
-    if raw is not None and spectral is not None and raw - spectral > 0.1:
-        verdict += (
-            f" <strong>The cause is visible in the last two rows.</strong> Comparing the raw values scores "
-            f"{raw:.2f}, almost perfect, but stretching each photo on its own first drops that to {spectral:.2f}. "
-            "A big change in one photo shifts how that photo is stretched, so the whole scene looks different. "
-            "The network is trained on stretched photos too, so it very likely suffers the same way. I have not "
-            "retrained it with a shared stretch yet. That is the first thing to try."
-        )
+    verdict = verdict_text(baselines)
     return (f'<div class="card">{table}</div><div class="card">{bars}</div>'
             f'<div class="verdict"><p>{verdict}</p></div>')
+
+
+def _get(baselines: dict[str, dict[str, float]], key: str, metric: str = "auroc") -> float | None:
+    return baselines.get(key, {}).get(metric)
+
+
+def verdict_text(baselines: dict[str, dict[str, float]]) -> str:
+    """Plain-English reading of the comparison, written from the measured numbers."""
+    trained = _get(baselines, "trained")
+    old = _get(baselines, "trained_per_photo")
+    untrained = _get(baselines, "untrained")
+    simple = {k: _get(baselines, k) for k in ("diff_shared", "diff_raw") if _get(baselines, k) is not None}
+    best_simple = max(simple.values()) if simple else None
+    parts = []
+    if old is not None and trained - old > 0.2:
+        parts.append(
+            f"<strong>One change fixed the network.</strong> The same trained weights score {old:.3f} when each photo "
+            f"is brightness-stretched on its own (close to guessing) and {trained:.3f} when both photos share one "
+            "stretch. A big change in one photo shifts how that photo is stretched, so with separate stretches the "
+            "whole scene looked different."
+        )
+    elif trained < 0.6:
+        parts.append(f"<strong>The trained network does not work yet.</strong> It scores {trained:.3f}, close to guessing.")
+    else:
+        parts.append(f"The trained network scores {trained:.3f}.")
+    if untrained is not None and trained - untrained < 0.01:
+        parts.append(
+            f"<strong>But the pretraining is not shown to help.</strong> The same network with random, untrained "
+            f"weights scores {untrained:.3f}. Self-supervised pretraining is the point of this project, so that is the "
+            "result to take seriously."
+        )
+    if best_simple is not None and trained >= best_simple - 0.01:
+        parts.append(
+            f"<strong>The network also does not beat a plain colour difference.</strong> Subtracting the photos with "
+            f"no network at all scores {best_simple:.3f}, the same. These synthetic scenes are easy: the change is a "
+            "flat patch on a smooth background, so they show that the code works, not that the network adds anything. "
+            "Real, harder scenes are the real test."
+        )
+    elif best_simple is not None:
+        parts.append(f"The best plain colour difference scores {best_simple:.3f}.")
+    f1_net, f1_simple = _get(baselines, "trained", "f1"), _get(baselines, "diff_shared", "f1")
+    if f1_simple is not None and f1_net < f1_simple - 0.1:
+        parts.append(
+            f"Separately, the network's final map is worse than its ranking suggests: the automatic cut-off marks too "
+            f"many pixels as changed, so its map scores F1 {f1_net:.2f} against {f1_simple:.2f} for the plain difference."
+        )
+    return " ".join(parts)
+
+
+def status_line(baselines: dict[str, dict[str, float]]) -> str:
+    trained = _get(baselines, "trained")
+    old = _get(baselines, "trained_per_photo")
+    if old is not None and trained - old > 0.2:
+        return (
+            f"After fixing a brightness-scaling flaw, the trained network scores {trained:.3f} on held-out synthetic "
+            "scenes. It is not yet shown to beat a plain colour difference or an untrained network, and it has not "
+            "been tested on real data."
+        )
+    return f"On held-out synthetic scenes the trained network scores {trained:.3f}."
 
 
 def scene_table(scenes: list[dict]) -> str:
@@ -291,9 +335,7 @@ def build(history: list[dict], report: dict, baselines: dict[str, dict[str, floa
 <p class="lede">Give it two photos of the same place taken months apart, and it marks the pixels that
 changed: cleared forest, new buildings, flooding. It learns what satellite images look like from
 <strong>unlabelled</strong> photos, so nobody has to hand-label thousands of examples.</p>
-<p class="note"><strong>Status:</strong> a research project with an honest negative result. On photos it
-had not seen, the trained network does not yet beat a simple colour difference. The sections below show
-what that means and why.</p>
+<p class="note"><strong>Status:</strong> a research project. {status_line(baselines)}</p>
 <p class="links">
   <a href="{REPO_URL}">Source code</a>
   <a href="{REPO_URL}#quick-start">Quick start</a>
@@ -307,19 +349,20 @@ what that means and why.</p>
 <div class="card">{flow_diagram()}</div>
 <p>First it learns, with no answers given, what ordinary satellite imagery looks like. Then, for a before and after
 photo, it describes each pixel of both with the same network, and marks the pixels whose descriptions differ
-most. A cut-off picks which of those count as changed.</p>
+most. Both photos are first scaled with one shared brightness stretch, so ground that did not change looks the
+same in both. A cut-off then picks which pixels count as changed.</p>
 
 <h2>How well does it work?</h2>
 <p>The network was trained on 8 synthetic scenes and tested on 4 others it had never seen. Every method below was
 tested on the same 4 scenes and uses the same cut-off rule. Higher is better. A score of 0.5 on AUROC means no
-better than guessing. See the glossary for what each column means.</p>
+better than guessing. The first two rows are the same trained weights and differ only in how the photos are
+brightness-stretched before the network sees them. See the glossary for what each column means.</p>
 {comparison_section(baselines)}
 
 <h2>Training details</h2>
 <div class="card">{loss_chart(history)}</div>
 <p class="note">Loss over {epochs} epochs, reproduced by <code>scripts/reproduce_results.py</code>.
-Final loss: {final_loss:.3f}. The loss falls, so the network is learning its training task, but that task has
-not yet translated into finding change.</p>
+Final loss: {final_loss:.3f}. The loss falls, so the network is learning its training task.</p>
 <h3>Results scene by scene (trained network)</h3>
 <div class="card">{scene_table(report["scenes"])}</div>
 <p class="note">These are synthetic scenes: the changed patch is a flat, distinct colour with mild noise, so

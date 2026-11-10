@@ -2,7 +2,14 @@ from pathlib import Path
 
 import numpy as np
 
-from sat_change.io import discover_images, discover_masks, normalize_reflectance, pair_images, scene_key
+from sat_change.io import (
+    discover_images,
+    discover_masks,
+    normalize_pair,
+    normalize_reflectance,
+    pair_images,
+    scene_key,
+)
 
 
 def test_scene_key_strips_date_suffix():
@@ -47,3 +54,28 @@ def test_normalization_handles_scaled_and_nan():
     y = normalize_reflectance(x)
     assert y.shape == x.shape and np.isfinite(y).all()
     assert 0 <= y.min() <= y.max() <= 1
+
+
+def test_normalize_pair_keeps_unchanged_pixels_identical():
+    """Unchanged pixels must get the same value in both dates, even with a big change elsewhere."""
+    rng = np.random.default_rng(0)
+    before = (0.2 + 0.5 * rng.random((4, 40, 40))).astype(np.float32)
+    after = before.copy()
+    after[:, :15, :15] = 0.01  # large change
+    nb, na = normalize_pair(before, after)
+    assert np.allclose(nb[:, 20:, 20:], na[:, 20:, 20:])
+    assert not np.allclose(nb[:, :15, :15], na[:, :15, :15])
+
+    # Per-photo stretching moves the unchanged background, which is the bug this avoids.
+    assert not np.allclose(normalize_reflectance(before)[:, 20:, 20:], normalize_reflectance(after)[:, 20:, 20:])
+
+
+def test_normalize_pair_scales_integer_reflectance_and_handles_nan():
+    rng = np.random.default_rng(1)
+    before = rng.random((4, 16, 16)).astype(np.float32) * 10000
+    after = before.copy()
+    before[0, 0, 0] = np.nan
+    nb, na = normalize_pair(before, after)
+    assert np.isfinite(nb).all() and np.isfinite(na).all()
+    assert 0 <= nb.min() <= nb.max() <= 1 and 0 <= na.min() <= na.max() <= 1
+    assert nb[0, 0, 0] == 0  # nodata becomes 0

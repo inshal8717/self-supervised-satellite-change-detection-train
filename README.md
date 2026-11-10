@@ -9,21 +9,22 @@ photos, then compares what its neural network "sees" in the two photos.
 
 **Project page (pictures, results, glossary):** https://inshal8717.github.io/self-supervised-satellite-change-detection-train/
 
-> **Status: a research project with an honest negative result.** On photos the network never saw, the trained network
-> does not yet beat a simple colour difference. The cause is visible in the table below. Earlier figures in this
-> repository (AUROC 0.98) were measured on the training scenes and are withdrawn.
+> **Status: a research project.** After fixing a brightness-scaling flaw (below), the trained network ranks changed
+> pixels almost perfectly on held-out synthetic scenes. It is **not** yet shown to beat a plain colour difference or
+> an untrained network, and it has not been tested on real data. Earlier figures in this repository (AUROC 0.98) were
+> measured on the training scenes and are withdrawn.
 
 ## What it looks like
 
 One held-out synthetic scene. Orange means "changed". The first two are the question, the third is the answer key,
 and the rest are attempts at the answer.
 
-| Before | After | What really changed | Trained network | Colour difference, raw |
-| :---: | :---: | :---: | :---: | :---: |
-| <img src="docs/img/example_before.png" width="150"> | <img src="docs/img/example_after.png" width="150"> | <img src="docs/img/example_truth.png" width="150"> | <img src="docs/img/example_model.png" width="150"> | <img src="docs/img/example_raw.png" width="150"> |
+| Before | After | What really changed | Trained network | Same network, old scaling | Colour difference, raw |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| <img src="docs/img/example_before.png" width="120"> | <img src="docs/img/example_after.png" width="120"> | <img src="docs/img/example_truth.png" width="120"> | <img src="docs/img/example_model.png" width="120"> | <img src="docs/img/example_model_old.png" width="120"> | <img src="docs/img/example_raw.png" width="120"> |
 
-The trained network marks most of the scene as changed. A plain colour difference on the raw values finds just the
-changed patch.
+With the old scaling, the network marks most of the scene as changed. With the fix it finds the patch, though it still
+marks some extra pixels.
 
 ## Results on held-out synthetic scenes
 
@@ -32,22 +33,34 @@ scenes and the same per-scene Otsu cut-off. Reproduce with `python scripts/repro
 
 | Method | AUROC | F1 | IoU | Precision | Recall |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Trained network | 0.491 | 0.181 | 0.101 | 0.103 | 0.798 |
-| Same network, untrained (random weights) | 0.702 | 0.529 | 0.449 | 0.477 | 0.673 |
-| Colour difference, each photo stretched on its own | 0.740 | 0.240 | 0.138 | 0.144 | 0.757 |
-| Colour difference, raw values | **1.000** | **1.000** | **1.000** | **1.000** | **1.000** |
+| Trained network (shared stretch, current) | 0.999 | 0.739 | 0.588 | 0.588 | 1.000 |
+| Same trained network, old per-photo stretch | 0.491 | 0.181 | 0.101 | 0.103 | 0.798 |
+| Same network, untrained (random weights) | 0.998 | 0.875 | 0.780 | 0.825 | 0.944 |
+| Colour difference, shared stretch | 1.000 | 0.999 | 0.999 | 0.999 | 1.000 |
+| Colour difference, per-photo stretch | 0.740 | 0.240 | 0.138 | 0.144 | 0.757 |
+| Colour difference, raw values | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
 
-How to read it: AUROC is a score from 0 to 1, where 0.5 is the same as guessing and 1.0 is perfect. F1 and IoU score
-the final changed/unchanged map the same way. The page above has a glossary.
+How to read it: AUROC is a score from 0 to 1 for how well a method ranks truly changed pixels above unchanged ones.
+0.5 is the same as guessing and 1.0 is perfect. F1 and IoU score the final changed/unchanged map the same way. The
+project page has a glossary.
 
-**Why the last two rows matter.** Before comparing, the code stretches each photo's brightness using that photo's own
-percentiles (`normalize_reflectance`). A large change in one photo shifts its stretch, so the whole scene looks
-different from the other photo. Without that stretch, a plain difference separates the change perfectly. The network
-is trained on stretched photos as well, so it very likely suffers the same way. I have not retrained it with one
-shared stretch for both dates, and that is the first thing to try.
+**What was wrong, and the fix.** The code used to stretch each photo's brightness using that photo's own percentiles
+(`normalize_reflectance`). A large change in one photo shifts its stretch, so the whole scene looked different from the
+other photo. Both dates now share one stretch (`normalize_pair`, used by `score_pair`). The same trained weights went
+from AUROC 0.491 to 0.999 with no retraining, which is the first two rows. `stretch="per_photo"` keeps the old
+behaviour so that comparison stays reproducible.
 
-The scenes are synthetic, with flat, distinct changed patches and mild noise, so even the perfect score does not
-predict real-world accuracy. These numbers check that the pipeline runs and show how the methods compare.
+**What the table does not show.** Three things limit the conclusions:
+
+1. **Pretraining is not shown to help.** The same network with random, untrained weights scores AUROC 0.998, and a
+   better F1 (0.875) than the trained one (0.739).
+2. **The network does not beat a plain colour difference.** Subtracting the photos, with no network, scores 1.000 on
+   AUROC and F1 0.999.
+3. **The automatic cut-off over-marks changed pixels for the network.** It ranks pixels almost perfectly (AUROC 0.999)
+   but Otsu thresholding picks a cut-off that gives precision 0.588, so the final map is worse than the ranking.
+
+The scenes are synthetic, with flat, distinct changed patches and mild noise, so every method here finds them easily.
+These numbers check that the pipeline runs and show how the methods compare. They do not predict real-world accuracy.
 
 ## Architecture
 
@@ -158,8 +171,8 @@ scene key and window date.
 
 Two augmented views of the same patch are positives. All other samples in the batch are negatives. Pretraining never
 sees before/after pairs, so it learns from single images. Augmentations are flips, rotations, mild gain and bias
-jitter, noise and blur, which keep spatial structure. At inference, normalised features for the two dates are compared
-with cosine distance at three scales. The scales are upsampled and averaged, and Otsu thresholding gives a
+jitter, noise and blur, which keep spatial structure. At inference, the two dates are scaled with one shared stretch,
+their features are compared with cosine distance at three scales. The scales are upsampled and averaged, and Otsu thresholding gives a
 label-free mask.
 
 **Evaluation caveats:** the held-out split is by scene, not by patch, which avoids spatial leakage. Each scene's
@@ -175,16 +188,17 @@ rare.
   not a calibrated class probability.
 - **Tiled inference with overlap:** the network runs tile by tile, which bounds memory per forward pass. Both input
   scenes are still loaded in full, and overlap adds runtime.
-- **Per-image normalisation:** each date is normalised by its own percentiles. That is simple, but a change in scene
-  composition shifts that date's scale, so it creates false change. On the held-out scenes this cut a plain
-  difference's AUROC from 1.00 to 0.74 (see Results), so it is the leading suspect for the trained network's failure.
+- **Shared stretch at inference, per-image stretch in training:** pretraining sees single photos, so each is
+  stretched on its own. Scoring a pair uses one stretch for both dates, which is what fixed the original failure. The
+  mismatch between the two did not hurt on the synthetic scenes, but training on shared-stretch pairs is untested.
 - **AdamW with cosine decay:** a stable default for contrastive training. It is not tuned for any particular biome.
 
 ## Limitations
 
 This is a research baseline, not an operational product.
 
-- On held-out synthetic scenes it does not beat a simple spectral difference (see Results).
+- On held-out synthetic scenes it matches but does not beat a plain colour difference, and an untrained network does as
+  well (see Results). The benefit of pretraining is not shown.
 - It has not been evaluated on real labelled change data. Public benchmarks with trusted masks are the necessary next step.
 - The model outputs a binary change mask. It does not identify the type of change.
 - Inputs must already be co-registered at pixel level. Misalignment produces false positives.
@@ -195,12 +209,14 @@ This is a research baseline, not an operational product.
 
 Next steps, in order of value:
 
-1. Normalise the before and after photos with one shared stretch, then retrain and re-score. This directly tests the
-   leading explanation for the negative result.
-2. Test on real labelled change data (for example, public building or deforestation masks).
+1. Test on real labelled change data (for example, public building or deforestation masks). The synthetic scenes are
+   too easy to separate the methods.
+2. Check whether pretraining helps at all: sweep the number of scenes and epochs, and compare against the untrained
+   network on harder data.
 3. Compare against more baselines: NDVI/NDBI/NDWI differences, and a small supervised U-Net trained on the same scenes.
-4. Tune the pretraining budget and the number of scenes, and check whether the random-encoder result depends on the architecture.
-5. Calibrate the threshold on a validation region, and report precision-recall curves.
+4. Fix the over-marking: calibrate the threshold on a validation region instead of using Otsu, and report
+   precision-recall curves.
+5. Try training on shared-stretch before/after pairs, so training and scoring use the same scaling.
 
 ## Tests and lint
 
@@ -210,7 +226,7 @@ ruff check .
 python -m pytest -q
 ```
 
-CI runs both on every push and pull request, on Python 3.10 and 3.12 (`.github/workflows/ci.yml`). The suite has 31
+CI runs both on every push and pull request, on Python 3.10 and 3.12 (`.github/workflows/ci.yml`). The suite has 40
 tests, including an end-to-end run on tiny synthetic data that finishes in a few seconds on a CPU, and checks that
 the project page builds, loads no scripts, and matches the committed results.
 
